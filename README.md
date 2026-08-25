@@ -9,6 +9,7 @@ referencing its directory on a machine that runs `dsh`.
 |---|---|
 | [`dsh-skill-mcp-manager`](skill-mcp-manager/README.md) | **Settings → "Skills & MCP"**. Manage skills in `~/.agents/skills` (list, add by typing or **uploading a `.md` file**, toggle model/user visibility) and MCP servers (add/remove stdio & streamable-http servers with live connection status). MCP changes are written to `~/.dsh/cordis.patch.yml` and **go live without restarting the GUI** via dsh's hot config reload. |
 | [`dsh-system-prompt-editor`](system-prompt-editor/README.md) | **Settings → "System Prompt"**. Edit the assembled system prompt of every new session: custom text, persona, and tool-guidance overrides, plus a preview of the full model-visible prompt. Changes apply on the very next request — no restart. |
+| [`dsh-web-search-searxng`](web-search-searxng/README.md) | **Web search via SEARXNG.** Registers a SEARXNG-backed `WebSearchProvider` into the `ctx.web` seam so the model's `web_search` tool runs against your own instance instead of the shipped DeepSeek-backed provider. Host-only, no Settings UI. |
 
 Each plugin's README documents its behavior, config, and verification in detail.
 

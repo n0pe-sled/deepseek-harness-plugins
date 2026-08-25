@@ -1,0 +1,7 @@
+# The dsh-web-search-searxng bundle layer: one host row that registers a
+# SEARXNG-backed WebSearchProvider into ctx.web. Activation waits on the `web`
+# seam (mounted by dsh-base), so this row runs wherever the seam exists.
+
+- insert:
+    - id: web-search-searxng
+      name: dsh-web-search-searxng
