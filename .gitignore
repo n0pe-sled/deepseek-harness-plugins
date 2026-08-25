@@ -1,0 +1,14 @@
+# Machine-local package state (never commit)
+node_modules/
+.pnpm-store/
+
+# Editor / OS noise
+.DS_Store
+*.log
+
+# Note: the built `lib/` directories ARE committed on purpose — a fresh clone
+# is immediately usable by `dsh plugin add <dir>` without a build step
+# (the `prepare` script rebuilds them on `npm publish`/git installs anyway).
+
+# trufflehog exclude helper (local)
+.trufflehog-exclude
