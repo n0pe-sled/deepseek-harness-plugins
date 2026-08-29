@@ -7,7 +7,7 @@ behind an are-you-sure dialog that shows exactly what will be deleted:
    the sidebar (next to Rename / Delete workspace). Deletes every session log
    stored on disk for that one workspace, then removes the workspace itself
    from the sidebar.
-2. **Clear all session history.** A red button directly below the New Session
+2. **Clear All Session History.** A red button directly below the New Session
    button. Deletes every session log on disk across all workspaces, then
    removes every workspace from the sidebar (a full reset to the blank state).
 3. **Delete session.** A red row (trash icon) inside any session's own "…"
@@ -35,7 +35,7 @@ so what disappears from disk is exactly what the sidebar lists. Effects:
 - The cleared workspace is removed from the registration registry
   (`$DSH_HOME/storages/workspace.json`), so its row disappears from the
   sidebar. A clear-all removes every workspace registration. Any
-  currently-open session that belonged to a removed workspace moves to the
+  still-running session that belonged to a removed workspace moves to the
   Ungrouped bucket, matching the app's own Delete workspace behavior.
 - A partial clear (some logs could not be resolved to safe directories) keeps
   the workspace, so the leftover sessions stay grouped instead of being
@@ -52,20 +52,20 @@ home's sessions, a clear removed them, and the default home stayed untouched.
 
 ### What is deliberately kept
 
-The rule depends on the action:
+Every action shares one rule:
 
-- **Workspace and clear-all** keep **sessions the host currently holds**
-  (attached/open) plus cold subagent logs whose lineage reaches one (fixpoint
-  over `parentSession` chains): deleting an attached log underneath its writer
-  would leave a recreated, headerless file. The dialog reports the kept count.
-- **Delete session (single)** is the "make this one gone" action: it deletes
-  the log even for an attached-but-idle session. Because the host still holds
-  that session in memory (so it would linger in the sidebar after a reload),
-  the clear first archives it — the host's own archive hides the row and
-  clears the selection if it was the current session — then removes the log.
-  The only session it refuses is one whose agent is **actively running** (a
-  turn is in flight and the log is being appended), plus cold subagents of
-  running parents.
+- The only sessions any clear refuses are those whose agent is **actively
+  running** (a turn is in flight and the log is being appended), plus cold
+  subagent logs whose lineage reaches a running session (fixpoint over
+  `parentSession` chains): deleting a log underneath its writer would leave a
+  recreated, headerless file. The dialog reports the kept count.
+- Attached-but-idle (open) sessions ARE deleted. A host keeps every session
+  it has touched in memory for the rest of the run, so protecting attachment
+  would make workspace and clear-all no-ops until a restart. Because the host
+  still lists such a session from memory (it would linger in the sidebar
+  after a reload), the clear first archives it — the host's own archive hides
+  the row and clears the selection if it was the current session — then
+  removes the log.
 - Anything the persistence backend cannot resolve to a well-shaped session
   directory (basename must equal the session id, parent must match the
   project-key shape). Such entries are counted as unresolved and reported
@@ -142,7 +142,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 ## Verification
 
 - `pnpm test` (node half against stubbed services + temp sessions root):
-  scope matching, live/subagent keep rules, occurrence resolution, unknown
+  scope matching, running/subagent keep rules, occurrence resolution, unknown
   workspace soft failure, workspace-registration removal (per-workspace and
   clear-all), partial-clear keeps the workspace, single-session delete
   (cold deletes, attached-but-idle deletes and archives to hide, running
@@ -162,4 +162,5 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   ```
 
   The returned `targets` count matches `find ~/.dsh/sessions -mindepth 2
-  -maxdepth 2 -type d | wc -l` (minus currently-open sessions).
+  -maxdepth 2 -type d | wc -l` (minus sessions whose agent is running at that
+  moment, reported as `kept`).

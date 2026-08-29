@@ -49,7 +49,8 @@ export interface SessionScopeInput {
 export interface ClearCounts {
   /** Session logs the call deletes (or would delete). */
   readonly targets: number
-  /** Session logs inside the scope that are kept (currently open or needed by an open session). */
+  /** Session logs inside the scope that are kept (their agent is actively
+   * running, or a running session's lineage needs them). */
   readonly kept: number
 }
 

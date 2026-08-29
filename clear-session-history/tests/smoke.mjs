@@ -5,11 +5,13 @@
  * root (never the real $DSH_HOME):
  *   - name / inject contract;
  *   - apply() wiring: receiver registration, typert contribution;
- *   - preview/clear scoped to one workspace: only that workspace's cold logs
- *     are deleted; the live session and its cold subagent are kept; a fully
- *     cleared workspace is removed from the registry;
- *   - clear-all: orphaned no-cwd logs go, protected lineages survive, every
- *     remaining workspace registration is removed;
+ *   - preview/clear scoped to one workspace: every log in the workspace is
+ *     deleted (attached-but-idle sessions included, archived to hide their
+ *     rows); a fully cleared workspace is removed from the registry;
+ *   - clear-all: orphaned no-cwd logs go, every remaining workspace
+ *     registration is removed;
+ *   - running protection: with an agents service present, a workspace scan
+ *     keeps the actively running session (and would keep its subagents);
  *   - workspace resolution: unknown titles fail soft, occurrence picks the
  *     right row among same-titled workspaces;
  *   - a partial clear (unresolvable logs) never removes the workspace;
@@ -131,7 +133,7 @@ assert.deepEqual(
 
 const wsInput = { workspaceTitle: 'ws', titleOccurrence: 0 }
 const preview = await receiver.preview(wsInput)
-assert.deepEqual(preview, { ok: true, targets: 2, kept: 2 }, 'two cold logs targeted, live + its subagent kept')
+assert.deepEqual(preview, { ok: true, targets: 4, kept: 0 }, 'no agents service: every ws log is a target, attached-idle included')
 assert.ok(exists(root, '--Users-test-ws--', 'session-aaaa-1111'), 'preview deletes nothing')
 assert.equal(registry.deleted.size, 0, 'preview removes no workspace')
 
@@ -150,14 +152,16 @@ if (!occurrence.ok) assert.match(occurrence.error, /not registered/)
 const cleared = await receiver.clear(wsInput)
 assert.equal(cleared.ok, true)
 if (cleared.ok) {
-  assert.equal(cleared.deleted, 2)
-  assert.equal(cleared.kept, 2)
+  assert.equal(cleared.deleted, 4, 'every ws log deleted, attached-idle included')
+  assert.equal(cleared.kept, 0)
   assert.equal(cleared.removed, 1, 'the fully cleared workspace is removed from the registry')
 }
 assert.ok(!exists(root, '--Users-test-ws--', 'session-aaaa-1111'), 'cold log removed')
 assert.ok(!exists(root, '--Users-test-ws--', 'session-bbbb-2222'), 'cold log removed')
-assert.ok(exists(root, '--Users-test-ws--', 'session-live-3333'), 'live log kept')
-assert.ok(exists(root, '--Users-test-ws--', 'session-sub-4444'), 'cold subagent of live kept')
+assert.ok(!exists(root, '--Users-test-ws--', 'session-live-3333'), 'attached-but-idle log removed')
+assert.ok(!exists(root, '--Users-test-ws--', 'session-sub-4444'), 'its cold subagent log removed')
+assert.ok(registry.archived.has('session-live-3333'), 'attached session archived to hide its row')
+assert.ok(!registry.archived.has('session-aaaa-1111'), 'cold sessions need no archive')
 assert.ok(registry.deleted.has('ws-1'), 'workspace ws-1 registration removed')
 assert.ok(!registry.deleted.has('ws-2'), 'the other workspace stays registered')
 
@@ -167,11 +171,10 @@ const all = await receiver.clear({ workspaceTitle: '', titleOccurrence: 0 })
 assert.equal(all.ok, true)
 if (all.ok) {
   assert.equal(all.deleted, 1, 'only the orphaned no-cwd log remains to delete')
-  assert.equal(all.kept, 2)
+  assert.equal(all.kept, 0)
   assert.equal(all.removed, 1, 'the remaining workspace registration is removed')
 }
 assert.ok(!exists(root, '_no-cwd', 'session-orphan-5555'), 'orphan log removed')
-assert.ok(exists(root, '--Users-test-ws--', 'session-live-3333'), 'live log survives clear-all')
 assert.ok(registry.deleted.has('ws-2'), 'workspace ws-2 registration removed by clear-all')
 
 // ---- occurrence picks the second same-titled workspace -----------------------
@@ -257,6 +260,12 @@ const { ctx: ctxS, provided: providedS } = makeCtx({
 })
 plugin.apply(ctxS)
 const sessionsReceiver = providedS.clearSessionHistory
+
+// Workspace scan with an agents service: the actively running session is the
+// only kept log; everything else (attached-idle, cold, subagent-of-idle) is a
+// target. Preview only — the dirs are needed by the single-session tests below.
+const wsRunningPreview = await sessionsReceiver.preview(wsInput)
+assert.deepEqual(wsRunningPreview, { ok: true, targets: 4, kept: 1 }, 'workspace scan keeps only the running session')
 
 const noSuchPreview = await sessionsReceiver.previewSession({ sessionId: 'session-nope-9999' })
 assert.equal(noSuchPreview.ok, false)

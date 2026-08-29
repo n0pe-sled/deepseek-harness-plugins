@@ -156,6 +156,10 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
           ? `This session is currently running (an agent turn is in flight), so it can't be deleted yet. Try again once it finishes.`
           : `No session log was found on disk for "${sessionName}". There is nothing to delete.`
       }
+      if (counts.kept > 0) {
+        const keptNoun = counts.kept === 1 ? 'The only session log' : `All ${counts.kept} session logs`
+        return `${keptNoun} for ${scopeLabel} belong${counts.kept === 1 ? 's' : ''} to currently running sessions, so nothing can be deleted right now. Try again once they finish.`
+      }
       return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`
     }
     if (request.mode === 'session') {
@@ -163,12 +167,12 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
     }
     const noun = counts.targets === 1 ? 'session log' : 'session logs'
     const keptNote = counts.kept > 0
-      ? ` Sessions that are currently open (and their running subagents) are kept: ${counts.kept}.`
-      : ' Sessions that are currently open are kept.'
+      ? ` ${counts.kept} ${counts.kept === 1 ? 'log belongs' : 'logs belong'} to currently running sessions and ${counts.kept === 1 ? 'is' : 'are'} kept.`
+      : ''
     const removedNote = request.mode === 'workspace'
       ? ` and removes the workspace from the sidebar`
       : ' and removes every workspace from the sidebar'
-    return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}${removedNote}.${keptNote}`
+    return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}${removedNote}. Open sessions that are idle are deleted too.${keptNote}`
   })()
 
   const confirmLabel = previewPending || previewFailed
@@ -210,7 +214,7 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
   return (
     <RiskConfirmation
       open
-      title={request.mode === 'session' ? 'Delete session' : request.mode === 'workspace' ? 'Clear session history' : 'Clear all session history'}
+      title={request.mode === 'session' ? 'Delete session' : request.mode === 'workspace' ? 'Clear session history' : 'Clear All Session History'}
       description={failure !== null ? `Delete failed: ${failure}` : result !== null ? result : description}
       acknowledgeLabel={resolveAcknowledge(counts, previewPending, previewFailed, nothingToDelete, request.mode)}
       cancelLabel="Cancel"

@@ -83,11 +83,11 @@ const SESSION_DELETE_LABEL: Record<'en' | 'zh', string> = {
   zh: '删除会话',
 }
 const SIDEBAR_LABEL: Record<'en' | 'zh', string> = {
-  en: 'Clear all session history',
+  en: 'Clear All Session History',
   zh: '清空全部会话记录',
 }
 const SIDEBAR_ARIA: Record<'en' | 'zh', string> = {
-  en: 'Clear all session history',
+  en: 'Clear All Session History',
   zh: '清空全部会话记录',
 }
 

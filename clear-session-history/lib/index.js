@@ -113,19 +113,17 @@ const DESCRIPTORS = [
 * backend's `locate()` resolves without guessing at the project-slug algorithm.
 *
 * Safety model — the persistence service is append-only and knows nothing
-* about this plugin, so the rules err toward keeping data, but they differ by
-* action:
-*   - Workspace/all clears keep every session the host currently holds
-*     (`sessions` store) plus cold subagent logs whose parent lineage reaches
-*     one (fixpoint over `parentSession` chains): deleting an attached log
-*     underneath its writer would leave a recreated, headerless file.
-*   - A single-session delete is the deliberate "make this one gone" action,
-*     so it deletes even an attached-but-idle session's log; the only
-*     sessions it refuses are those whose agent is actively running (a turn
-*     is in flight and its log is being written) plus their cold subagent
-*     chains. To stop an attached session from lingering in the sidebar the
-*     clear archives it first (the host's own archive hides the row and
-*     clears the selection for the current session).
+* about this plugin. Every action shares one protection rule: the only
+* sessions kept are those whose agent is actively running (a turn is in
+* flight and its log is being written) plus, by fixpoint over
+* `parentSession` chains, cold subagent logs whose lineage reaches one —
+* deleting a log underneath its writer would leave a recreated, headerless
+* file. Attached-but-idle sessions are deliberately deletable: a host that
+* has touched a session keeps it in memory for the rest of the run, so
+* protecting attachment would make workspace/all clears a no-op until
+* restart. To stop an attached session from lingering in the sidebar, any
+* clear that deletes one archives it first (the host's own archive hides
+* the row and clears the selection for the current session).
 *   - A directory is only removed when its basename equals the session id and
 *     its parent matches the backend's project-key shape, so a degenerate
 *     `locate()` result can never widen into a recursive wipe.
@@ -142,7 +140,7 @@ const DESCRIPTORS = [
 * sidebar too. A per-workspace clear removes that one workspace; a clear-all
 * removes every workspace. If only part of a clear succeeded the registration
 * is kept, so leftover logs stay grouped instead of being orphaned. Any
-* currently-open session that belonged to a removed workspace moves to the
+* still-running session that belonged to a removed workspace moves to the
 * Ungrouped bucket, exactly like the app's own Delete workspace action.
 *
 * All actions flow through a runtime-registered Typert endpoint
@@ -208,35 +206,12 @@ function apply(ctx) {
 		};
 	};
 	/**
-	* Sessions that must survive any clear: every live session plus, by
-	* fixpoint over `parentSession` chains, every cold subagent whose ancestry
-	* reaches a live session.
-	*/
-	const protectedIds = async (persistence, sessions) => {
-		const headers = await persistence.list();
-		const live = new Set(sessions.list().map((session) => session.id));
-		let grew = true;
-		while (grew) {
-			grew = false;
-			for (const header of headers) {
-				if (live.has(header.id)) continue;
-				if (header.origin !== "subagent") continue;
-				const parent = header.parentSession;
-				if (parent !== void 0 && live.has(parent)) {
-					live.add(header.id);
-					grew = true;
-				}
-			}
-		}
-		return live;
-	};
-	/**
-	* Sessions a single-session delete must not touch: sessions whose agent is
-	* actively running (a turn is in flight, so its log is being written) plus,
-	* by fixpoint over `parentSession` chains, cold subagents whose lineage
-	* reaches a running session. Attached-but-idle sessions are NOT protected
-	* here — the user asked that open sessions be deletable; their log is
-	* removed and the row hidden by archiving, so nothing writes to it again.
+	* Sessions no clear may touch: sessions whose agent is actively running
+	* (a turn is in flight, so its log is being written) plus, by fixpoint
+	* over `parentSession` chains, cold subagents whose lineage reaches a
+	* running session. Attached-but-idle sessions are NOT protected — open
+	* sessions are deletable by design; their log is removed and the row
+	* hidden by archiving, so nothing writes to it again.
 	*/
 	const runningProtectedIds = async (persistence, agents) => {
 		const headers = await persistence.list();
@@ -280,9 +255,9 @@ function apply(ctx) {
 	* whose canonical cwd equals the workspace's canonical path are in scope —
 	* the same membership rule the registry applies.
 	*/
-	const scanScope = async (persistence, sessions, workspace) => {
+	const scanScope = async (persistence, agents, workspace) => {
 		const headers = await persistence.list();
-		const protectedSet = await protectedIds(persistence, sessions);
+		const protectedSet = await runningProtectedIds(persistence, agents);
 		const workspacePath = workspace === void 0 ? void 0 : await canonicalize(workspace.path);
 		const targets = [];
 		let kept = 0;
@@ -345,18 +320,13 @@ function apply(ctx) {
 			ok: false,
 			error: resolved.error
 		};
-		if (resolved.workspace === void 0) return {
-			ok: true,
-			persistence: services.persistence,
-			sessions: services.sessions,
-			registry: services.registry
-		};
 		return {
 			ok: true,
 			persistence: services.persistence,
 			sessions: services.sessions,
 			registry: services.registry,
-			workspace: resolved.workspace
+			..."agents" in services && services.agents !== void 0 ? { agents: services.agents } : {},
+			...resolved.workspace === void 0 ? {} : { workspace: resolved.workspace }
 		};
 	};
 	/** Counts only: what a clear would delete for this scope, nothing touched. */
@@ -367,7 +337,7 @@ function apply(ctx) {
 			error: prepared.error
 		};
 		try {
-			const scope = await scanScope(prepared.persistence, prepared.sessions, prepared.workspace);
+			const scope = await scanScope(prepared.persistence, prepared.agents, prepared.workspace);
 			return {
 				ok: true,
 				targets: scope.targets.length,
@@ -387,18 +357,26 @@ function apply(ctx) {
 			ok: false,
 			error: prepared.error
 		};
-		const { persistence, sessions, registry, workspace } = prepared;
+		const { persistence, sessions, registry, agents, workspace } = prepared;
 		try {
-			const scope = await scanScope(persistence, sessions, workspace);
+			const scope = await scanScope(persistence, agents, workspace);
+			const attached = new Set(sessions.list().map((session) => session.id));
 			const touchedProjects = /* @__PURE__ */ new Set();
 			let deleted = 0;
 			let unresolved = 0;
+			let archived = 0;
 			for (const header of scope.targets) {
 				const location = persistence.locate(header);
 				const dir = location === void 0 ? null : sessionDirOf(header, location.path);
 				if (dir === null) {
 					unresolved += 1;
 					continue;
+				}
+				if (attached.has(header.id)) try {
+					await registry.archiveSession(header.id);
+					archived += 1;
+				} catch (error) {
+					log.warn("[clear-session-history] could not archive %s to hide it: %s", header.id, error instanceof Error ? error.message : String(error));
 				}
 				if (await deleteSessionDir(header, persistence)) {
 					deleted += 1;
@@ -426,7 +404,7 @@ function apply(ctx) {
 					log.warn("[clear-session-history] failed to remove workspace %s: %s", row.id, error instanceof Error ? error.message : String(error));
 				}
 			}
-			log.info("[clear-session-history] cleared %d session log(s) (kept %d, unresolved %d, removed %d workspace(s), scope %s)", deleted, scope.kept, unresolved, removed, workspace === void 0 ? "all workspaces" : `"${input.workspaceTitle}"`);
+			log.info("[clear-session-history] cleared %d session log(s) (kept %d running, archived %d, unresolved %d, removed %d workspace(s), scope %s)", deleted, scope.kept, archived, unresolved, removed, workspace === void 0 ? "all workspaces" : `"${input.workspaceTitle}"`);
 			return {
 				ok: true,
 				deleted,
