@@ -10,6 +10,7 @@ referencing its directory on a machine that runs `dsh`.
 | [`dsh-skill-mcp-manager`](skill-mcp-manager/README.md) | **Settings → "Skills & MCP"**. Manage skills in `~/.agents/skills` (list, add by typing or **uploading a `.md` file**, toggle model/user visibility) and MCP servers (add/remove stdio & streamable-http servers with live connection status). MCP changes are written to `~/.dsh/cordis.patch.yml` and **go live without restarting the GUI** via dsh's hot config reload. |
 | [`dsh-system-prompt-editor`](system-prompt-editor/README.md) | **Settings → "System Prompt"**. Edit the assembled system prompt of every new session: custom text, persona, and tool-guidance overrides, plus a preview of the full model-visible prompt. Changes apply on the very next request — no restart. |
 | [`dsh-web-search-searxng`](web-search-searxng/README.md) | **Web search via SEARXNG.** Registers a SEARXNG-backed `WebSearchProvider` into the `ctx.web` seam so the model's `web_search` tool runs against your own instance instead of the shipped DeepSeek-backed provider. Host-only, no Settings UI. |
+| [`dsh-clear-session-history`](clear-session-history/README.md) | **Clear session history from disk.** Adds a red "Clear session history" row to each workspace's sidebar "…" menu and a red "Clear all session history" button below New Session. Both delete session logs through the host's persistence backend, keep currently-open sessions and their subagent logs, and gate the deletion behind a checkbox confirm showing the exact count. |
 
 Each plugin's README documents its behavior, config, and verification in detail.
 
@@ -31,6 +32,7 @@ git clone https://github.com/n0pe-sled/deepseek-harness-plugins.git ~/dsh-plugin
 
 dsh plugin --profile web add ~/dsh-plugins/skill-mcp-manager
 dsh plugin --profile web add ~/dsh-plugins/system-prompt-editor
+dsh plugin --profile web add ~/dsh-plugins/clear-session-history
 ```
 
 Restart the GUI, then open **Settings** — the new "Skills & MCP" and "System
@@ -56,6 +58,8 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   http://127.0.0.1:3080/plugins/dsh-skill-mcp-manager/client.js    # 200
 curl -s -o /dev/null -w "%{http_code}\n" \
   http://127.0.0.1:3080/plugins/dsh-system-prompt-editor/client.js # 200
+curl -s -o /dev/null -w "%{http_code}\n" \
+  http://127.0.0.1:3080/plugins/dsh-clear-session-history/client.js # 200
 ```
 
 ## Updating
