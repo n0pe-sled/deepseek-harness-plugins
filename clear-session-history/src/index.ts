@@ -10,13 +10,19 @@
  * backend's `locate()` resolves without guessing at the project-slug algorithm.
  *
  * Safety model — the persistence service is append-only and knows nothing
- * about this plugin, so the rules here err toward keeping data:
- *   - A session that is live in the running host (`sessions` store) is never
- *     deleted; deleting an attached log underneath its writer would leave a
- *     recreated, headerless file.
- *   - A cold subagent log whose parent lineage reaches a live session is kept
- *     too (fixpoint over `parentSession` chains), so an open session's
- *     trajectory replay stays intact.
+ * about this plugin, so the rules err toward keeping data, but they differ by
+ * action:
+ *   - Workspace/all clears keep every session the host currently holds
+ *     (`sessions` store) plus cold subagent logs whose parent lineage reaches
+ *     one (fixpoint over `parentSession` chains): deleting an attached log
+ *     underneath its writer would leave a recreated, headerless file.
+ *   - A single-session delete is the deliberate "make this one gone" action,
+ *     so it deletes even an attached-but-idle session's log; the only
+ *     sessions it refuses are those whose agent is actively running (a turn
+ *     is in flight and its log is being written) plus their cold subagent
+ *     chains. To stop an attached session from lingering in the sidebar the
+ *     clear archives it first (the host's own archive hides the row and
+ *     clears the selection for the current session).
  *   - A directory is only removed when its basename equals the session id and
  *     its parent matches the backend's project-key shape, so a degenerate
  *     `locate()` result can never widen into a recursive wipe.
@@ -81,10 +87,16 @@ interface SessionsLike {
   list(): readonly { readonly id: string }[]
 }
 
-/** The slice of the workspace registry this plugin reads. */
+/** The slice of the agent registry this plugin reads (running-state checks). */
+interface AgentsLike {
+  get(id: string): { readonly status?: string } | undefined
+}
+
+/** The slice of the workspace registry this plugin reads/writes. */
 interface RegistryLike {
   list(): readonly { readonly id: string; readonly path: string; readonly title: string }[]
   delete(id: string): Promise<boolean>
+  archiveSession(sessionId: string): Promise<void>
 }
 
 /** Minimal logger face (present on the host composition). */
@@ -137,14 +149,16 @@ export function apply(ctx: Context): void {
     persistence: PersistenceLike
     sessions: SessionsLike
     registry: RegistryLike
+    agents?: AgentsLike
   } | { error: string } => {
     const persistence = service<PersistenceLike>(ctx, 'sessionPersistence')
     const sessions = service<SessionsLike>(ctx, 'sessions')
     const registry = service<RegistryLike>(ctx, 'workspaceRegistry')
+    const agents = service<AgentsLike>(ctx, 'agents')
     if (persistence === undefined) return { error: 'the sessionPersistence service is not available in this composition' }
     if (sessions === undefined) return { error: 'the sessions service is not available in this composition' }
     if (registry === undefined) return { error: 'the workspaceRegistry service is not available in this composition' }
-    return { persistence, sessions, registry }
+    return { persistence, sessions, registry, ...(agents === undefined ? {} : { agents }) }
   }
 
   /**
@@ -169,6 +183,41 @@ export function apply(ctx: Context): void {
       }
     }
     return live
+  }
+
+  /**
+   * Sessions a single-session delete must not touch: sessions whose agent is
+   * actively running (a turn is in flight, so its log is being written) plus,
+   * by fixpoint over `parentSession` chains, cold subagents whose lineage
+   * reaches a running session. Attached-but-idle sessions are NOT protected
+   * here — the user asked that open sessions be deletable; their log is
+   * removed and the row hidden by archiving, so nothing writes to it again.
+   */
+  const runningProtectedIds = async (
+    persistence: PersistenceLike,
+    agents: AgentsLike | undefined,
+  ): Promise<Set<string>> => {
+    const headers = await persistence.list()
+    const running = new Set<string>()
+    if (agents !== undefined) {
+      for (const header of headers) {
+        if (agents.get(header.id)?.status === 'running') running.add(header.id)
+      }
+    }
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const header of headers) {
+        if (running.has(header.id)) continue
+        if (header.origin !== 'subagent') continue
+        const parent = header.parentSession
+        if (parent !== undefined && running.has(parent)) {
+          running.add(header.id)
+          grew = true
+        }
+      }
+    }
+    return running
   }
 
   /**
@@ -376,20 +425,20 @@ export function apply(ctx: Context): void {
     }
   }
 
-  /** Locate one session by id and say why a delete would be refused. */
+  /** Locate one session by id and say why a single delete would be refused. */
   const inspectSession = async (
     persistence: PersistenceLike,
-    sessions: SessionsLike,
+    agents: AgentsLike | undefined,
     sessionId: string,
   ): Promise<{ header?: SessionHeaderLike; refusals: string[] }> => {
     const headers = await persistence.list()
     const header = headers.find(candidate => candidate.id === sessionId)
     if (header === undefined) return { refusals: [`no session with id "${sessionId}" is stored on disk`] }
-    const protectedSet = await protectedIds(persistence, sessions)
-    if (protectedSet.has(header.id)) {
+    const running = await runningProtectedIds(persistence, agents)
+    if (running.has(header.id)) {
       return {
         header,
-        refusals: ['this session is currently open (or needed by an open session) and cannot be deleted'],
+        refusals: ['this session is currently running (an agent turn is in flight) and cannot be deleted yet'],
       }
     }
     return { header, refusals: [] }
@@ -399,28 +448,43 @@ export function apply(ctx: Context): void {
   const previewSession = async (input: SessionScopeInput): Promise<PreviewOutcome> => {
     const services = resolveServices()
     if ('error' in services) return { ok: false, error: services.error }
-    const result = await inspectSession(services.persistence, services.sessions, input.sessionId)
+    const result = await inspectSession(services.persistence, services.agents, input.sessionId)
     if (result.header === undefined) return { ok: false, error: result.refusals[0] ?? 'session not found' }
     return result.refusals.length > 0
       ? { ok: true, targets: 0, kept: 1 }
       : { ok: true, targets: 1, kept: 0 }
   }
 
-  /** Delete one session's log from disk; never touches the workspace registration. */
+  /** Delete one session's log from disk; never touches the workspace registration.
+   * Attached-but-idle sessions are deletable by design: the log is removed and,
+   * because the host still holds the session in memory (so it would otherwise
+   * linger in the sidebar), it is also archived so the row leaves the UI. */
   const clearSession = async (input: SessionScopeInput): Promise<ClearOutcome> => {
     const services = resolveServices()
     if ('error' in services) return { ok: false, error: services.error }
-    const result = await inspectSession(services.persistence, services.sessions, input.sessionId)
+    const result = await inspectSession(services.persistence, services.agents, input.sessionId)
     if (result.header === undefined) return { ok: false, error: result.refusals[0] ?? 'session not found' }
     if (result.refusals.length > 0) return { ok: false, error: result.refusals[0] ?? 'session not found' }
     try {
+      const attached = services.sessions.list().some(session => session.id === input.sessionId)
+      if (attached) {
+        // Hide the row the host still lists from memory before the log is gone.
+        try {
+          await services.registry.archiveSession(input.sessionId)
+        } catch (error) {
+          log.warn(
+            '[clear-session-history] could not archive %s to hide it: %s', input.sessionId,
+            error instanceof Error ? error.message : String(error),
+          )
+        }
+      }
       const deleted = await deleteSessionDir(result.header, services.persistence) ? 1 : 0
       if (deleted === 1) {
         // Tidy: prune the project dir if this was its last session.
         const location = services.persistence.locate(result.header)
         if (location !== undefined) await pruneEmptyProjectDir(path.dirname(path.dirname(location.path)))
         log.info(
-          '[clear-session-history] deleted session log %s', result.header.id,
+          '[clear-session-history] deleted session log %s%s', result.header.id, attached ? ' (archived to hide)' : '',
         )
       }
       return { ok: true, deleted, targets: 1, kept: 0, removed: 0 }

@@ -13,8 +13,11 @@ behind an are-you-sure dialog that shows exactly what will be deleted:
 3. **Delete session.** A red row (trash icon) inside any session's own "…"
    menu in the sidebar (next to Rename / Fork / Archive). Deletes that one
    session's log from disk. The workspace and its other sessions are
-   untouched. A session that is currently open (or needed by an open session)
-   can't be deleted; the dialog says so and stays on disk.
+   untouched. Works on open (attached) sessions too: the log is removed and
+   the row leaves the sidebar immediately. The only thing it refuses is a
+   session whose agent is actively running (a turn in flight), since deleting
+   that would break the write in progress; the dialog says so and the delete
+   stays disabled until it finishes.
 ## What "delete" means
 
 Session logs live under `$DSH_HOME/sessions/<project-key>/<session-id>/`. The
@@ -49,10 +52,20 @@ home's sessions, a clear removed them, and the default home stayed untouched.
 
 ### What is deliberately kept
 
-- **Sessions that are currently open** in the running host: deleting an
-  attached log underneath its writer would leave a recreated, headerless file.
-- **Cold subagent logs whose lineage reaches a live session** (fixpoint over
-  `parentSession` chains): an open session's trajectory replay needs them.
+The rule depends on the action:
+
+- **Workspace and clear-all** keep **sessions the host currently holds**
+  (attached/open) plus cold subagent logs whose lineage reaches one (fixpoint
+  over `parentSession` chains): deleting an attached log underneath its writer
+  would leave a recreated, headerless file. The dialog reports the kept count.
+- **Delete session (single)** is the "make this one gone" action: it deletes
+  the log even for an attached-but-idle session. Because the host still holds
+  that session in memory (so it would linger in the sidebar after a reload),
+  the clear first archives it — the host's own archive hides the row and
+  clears the selection if it was the current session — then removes the log.
+  The only session it refuses is one whose agent is **actively running** (a
+  turn is in flight and the log is being appended), plus cold subagents of
+  running parents.
 - Anything the persistence backend cannot resolve to a well-shaped session
   directory (basename must equal the session id, parent must match the
   project-key shape). Such entries are counted as unresolved and reported
@@ -132,8 +145,13 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   scope matching, live/subagent keep rules, occurrence resolution, unknown
   workspace soft failure, workspace-registration removal (per-workspace and
   clear-all), partial-clear keeps the workspace, single-session delete
-  (cold deletes, open/protected refused, unknown id fails, workspace never
-  removed), degenerate `locate()` refusal, missing-service failure.
+  (cold deletes, attached-but-idle deletes and archives to hide, running
+  agent refused, unknown id fails, workspace never removed), degenerate
+  `locate()` refusal, missing-service failure.
+- `node tests/client-session-flow.mjs` (built client bundle under the harness
+  checkout's jsdom): drives the real pointerdown → session-menu → Delete
+  session → id-resolution path against a simulated grouped sidebar and asserts
+  the dialog acts on the resolved session id.
 - Live probe against a running instance (non-destructive):
 
   ```sh

@@ -82,14 +82,17 @@ const SESSIONS = { list: () => [{ id: 'session-live-3333' }] }
 /** Mutable workspace registry stub tracking deletions. */
 function makeRegistry(workspaces) {
   const deleted = new Set()
+  const archived = new Set()
   return {
     deleted,
+    archived,
     list: () => workspaces.filter(ws => !deleted.has(ws.id)),
     delete: async (id) => {
       if (deleted.has(id)) return false
       deleted.add(id)
       return true
     },
+    archiveSession: async (id) => { archived.add(id) },
   }
 }
 const WORKSPACES = [
@@ -234,10 +237,23 @@ assert.equal(hostileRegistry.deleted.size, 0, 'no workspace registration touched
 
 const sessRoot = makeSessionsRoot()
 const sessRegistry = makeRegistry([...WORKSPACES])
+const sessPersistence = makePersistence(sessRoot)
+// A session whose agent is actively running must be refused.
+mkdirSync(join(sessRoot, '--Users-test-ws--', 'session-running-9999'), { recursive: true })
+writeFileSync(join(sessRoot, '--Users-test-ws--', 'session-running-9999', 'session.jsonl.zstd'), 'stub')
+sessPersistence.list = async () => [
+  ...HEADERS,
+  { id: 'session-running-9999', cwd: '/Users/test/ws' },
+].filter(header => {
+  const project = header.cwd === undefined ? join(sessRoot, '_no-cwd') : join(sessRoot, '--Users-test-ws--')
+  return existsSync(join(project, header.id, 'session.jsonl.zstd'))
+})
+const agents = { get: id => (id === 'session-running-9999' ? { status: 'running' } : undefined) }
 const { ctx: ctxS, provided: providedS } = makeCtx({
-  sessionPersistence: makePersistence(sessRoot),
+  sessionPersistence: sessPersistence,
   sessions: SESSIONS,
   workspaceRegistry: sessRegistry,
+  agents,
 })
 plugin.apply(ctxS)
 const sessionsReceiver = providedS.clearSessionHistory
@@ -249,6 +265,7 @@ if (!noSuchPreview.ok) assert.match(noSuchPreview.error, /no session/)
 const noSuchClear = await sessionsReceiver.clearSession({ sessionId: 'session-nope-9999' })
 assert.equal(noSuchClear.ok, false)
 
+// Cold session: deleted, no archive (nothing lingers for the host).
 const coldPreview = await sessionsReceiver.previewSession({ sessionId: 'session-aaaa-1111' })
 assert.deepEqual(coldPreview, { ok: true, targets: 1, kept: 0 }, 'cold session is deletable')
 const coldClear = await sessionsReceiver.clearSession({ sessionId: 'session-aaaa-1111' })
@@ -258,18 +275,33 @@ if (coldClear.ok) {
   assert.equal(coldClear.removed, 0, 'a single-session delete never removes a workspace')
 }
 assert.ok(!exists(sessRoot, '--Users-test-ws--', 'session-aaaa-1111'), 'cold session dir removed')
+assert.ok(!sessRegistry.archived.has('session-aaaa-1111'), 'cold delete needs no archive')
 assert.equal(sessRegistry.deleted.size, 0, 'no workspace registration touched by a session delete')
 
+// Attached-but-idle session: deletable now; archived so the host-still-held
+// row leaves the sidebar.
 const livePreview = await sessionsReceiver.previewSession({ sessionId: 'session-live-3333' })
-assert.deepEqual(livePreview, { ok: true, targets: 0, kept: 1 }, 'open session is not deletable')
+assert.deepEqual(livePreview, { ok: true, targets: 1, kept: 0 }, 'attached-but-idle session is deletable')
 const liveClear = await sessionsReceiver.clearSession({ sessionId: 'session-live-3333' })
-assert.equal(liveClear.ok, false)
-if (!liveClear.ok) assert.match(liveClear.error, /open|needed/)
-assert.ok(exists(sessRoot, '--Users-test-ws--', 'session-live-3333'), 'live log untouched')
+assert.equal(liveClear.ok, true)
+if (liveClear.ok) assert.equal(liveClear.deleted, 1)
+assert.ok(!exists(sessRoot, '--Users-test-ws--', 'session-live-3333'), 'attached idle log removed')
+assert.ok(sessRegistry.archived.has('session-live-3333'), 'attached delete hides the row via archive')
 
+// Cold subagent of an attached-but-idle parent: also deletable.
+const subPreview = await sessionsReceiver.previewSession({ sessionId: 'session-sub-4444' })
+assert.deepEqual(subPreview, { ok: true, targets: 1, kept: 0 })
 const subClear = await sessionsReceiver.clearSession({ sessionId: 'session-sub-4444' })
-assert.equal(subClear.ok, false)
-assert.ok(exists(sessRoot, '--Users-test-ws--', 'session-sub-4444'), 'protected subagent log untouched')
+assert.equal(subClear.ok, true)
+assert.ok(!exists(sessRoot, '--Users-test-ws--', 'session-sub-4444'), 'idle subagent log removed')
+
+// Actively running session: refused, log untouched.
+const runningPreview = await sessionsReceiver.previewSession({ sessionId: 'session-running-9999' })
+assert.deepEqual(runningPreview, { ok: true, targets: 0, kept: 1 }, 'running session is not deletable yet')
+const runningClear = await sessionsReceiver.clearSession({ sessionId: 'session-running-9999' })
+assert.equal(runningClear.ok, false)
+if (!runningClear.ok) assert.match(runningClear.error, /running/)
+assert.ok(exists(sessRoot, '--Users-test-ws--', 'session-running-9999'), 'running log untouched')
 
 const orphanClear = await sessionsReceiver.clearSession({ sessionId: 'session-orphan-5555' })
 assert.equal(orphanClear.ok, true)

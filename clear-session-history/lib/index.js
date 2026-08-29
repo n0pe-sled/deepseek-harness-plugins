@@ -113,13 +113,19 @@ const DESCRIPTORS = [
 * backend's `locate()` resolves without guessing at the project-slug algorithm.
 *
 * Safety model — the persistence service is append-only and knows nothing
-* about this plugin, so the rules here err toward keeping data:
-*   - A session that is live in the running host (`sessions` store) is never
-*     deleted; deleting an attached log underneath its writer would leave a
-*     recreated, headerless file.
-*   - A cold subagent log whose parent lineage reaches a live session is kept
-*     too (fixpoint over `parentSession` chains), so an open session's
-*     trajectory replay stays intact.
+* about this plugin, so the rules err toward keeping data, but they differ by
+* action:
+*   - Workspace/all clears keep every session the host currently holds
+*     (`sessions` store) plus cold subagent logs whose parent lineage reaches
+*     one (fixpoint over `parentSession` chains): deleting an attached log
+*     underneath its writer would leave a recreated, headerless file.
+*   - A single-session delete is the deliberate "make this one gone" action,
+*     so it deletes even an attached-but-idle session's log; the only
+*     sessions it refuses are those whose agent is actively running (a turn
+*     is in flight and its log is being written) plus their cold subagent
+*     chains. To stop an attached session from lingering in the sidebar the
+*     clear archives it first (the host's own archive hides the row and
+*     clears the selection for the current session).
 *   - A directory is only removed when its basename equals the session id and
 *     its parent matches the backend's project-key shape, so a degenerate
 *     `locate()` result can never widen into a recursive wipe.
@@ -190,13 +196,15 @@ function apply(ctx) {
 		const persistence = service(ctx, "sessionPersistence");
 		const sessions = service(ctx, "sessions");
 		const registry = service(ctx, "workspaceRegistry");
+		const agents = service(ctx, "agents");
 		if (persistence === void 0) return { error: "the sessionPersistence service is not available in this composition" };
 		if (sessions === void 0) return { error: "the sessions service is not available in this composition" };
 		if (registry === void 0) return { error: "the workspaceRegistry service is not available in this composition" };
 		return {
 			persistence,
 			sessions,
-			registry
+			registry,
+			...agents === void 0 ? {} : { agents }
 		};
 	};
 	/**
@@ -221,6 +229,35 @@ function apply(ctx) {
 			}
 		}
 		return live;
+	};
+	/**
+	* Sessions a single-session delete must not touch: sessions whose agent is
+	* actively running (a turn is in flight, so its log is being written) plus,
+	* by fixpoint over `parentSession` chains, cold subagents whose lineage
+	* reaches a running session. Attached-but-idle sessions are NOT protected
+	* here — the user asked that open sessions be deletable; their log is
+	* removed and the row hidden by archiving, so nothing writes to it again.
+	*/
+	const runningProtectedIds = async (persistence, agents) => {
+		const headers = await persistence.list();
+		const running = /* @__PURE__ */ new Set();
+		if (agents !== void 0) {
+			for (const header of headers) if (agents.get(header.id)?.status === "running") running.add(header.id);
+		}
+		let grew = true;
+		while (grew) {
+			grew = false;
+			for (const header of headers) {
+				if (running.has(header.id)) continue;
+				if (header.origin !== "subagent") continue;
+				const parent = header.parentSession;
+				if (parent !== void 0 && running.has(parent)) {
+					running.add(header.id);
+					grew = true;
+				}
+			}
+		}
+		return running;
 	};
 	/**
 	* The session directory a header's backend artifact lives in, or null when
@@ -404,13 +441,13 @@ function apply(ctx) {
 			};
 		}
 	};
-	/** Locate one session by id and say why a delete would be refused. */
-	const inspectSession = async (persistence, sessions, sessionId) => {
+	/** Locate one session by id and say why a single delete would be refused. */
+	const inspectSession = async (persistence, agents, sessionId) => {
 		const header = (await persistence.list()).find((candidate) => candidate.id === sessionId);
 		if (header === void 0) return { refusals: [`no session with id "${sessionId}" is stored on disk`] };
-		if ((await protectedIds(persistence, sessions)).has(header.id)) return {
+		if ((await runningProtectedIds(persistence, agents)).has(header.id)) return {
 			header,
-			refusals: ["this session is currently open (or needed by an open session) and cannot be deleted"]
+			refusals: ["this session is currently running (an agent turn is in flight) and cannot be deleted yet"]
 		};
 		return {
 			header,
@@ -424,7 +461,7 @@ function apply(ctx) {
 			ok: false,
 			error: services.error
 		};
-		const result = await inspectSession(services.persistence, services.sessions, input.sessionId);
+		const result = await inspectSession(services.persistence, services.agents, input.sessionId);
 		if (result.header === void 0) return {
 			ok: false,
 			error: result.refusals[0] ?? "session not found"
@@ -439,14 +476,17 @@ function apply(ctx) {
 			kept: 0
 		};
 	};
-	/** Delete one session's log from disk; never touches the workspace registration. */
+	/** Delete one session's log from disk; never touches the workspace registration.
+	* Attached-but-idle sessions are deletable by design: the log is removed and,
+	* because the host still holds the session in memory (so it would otherwise
+	* linger in the sidebar), it is also archived so the row leaves the UI. */
 	const clearSession = async (input) => {
 		const services = resolveServices();
 		if ("error" in services) return {
 			ok: false,
 			error: services.error
 		};
-		const result = await inspectSession(services.persistence, services.sessions, input.sessionId);
+		const result = await inspectSession(services.persistence, services.agents, input.sessionId);
 		if (result.header === void 0) return {
 			ok: false,
 			error: result.refusals[0] ?? "session not found"
@@ -456,11 +496,17 @@ function apply(ctx) {
 			error: result.refusals[0] ?? "session not found"
 		};
 		try {
+			const attached = services.sessions.list().some((session) => session.id === input.sessionId);
+			if (attached) try {
+				await services.registry.archiveSession(input.sessionId);
+			} catch (error) {
+				log.warn("[clear-session-history] could not archive %s to hide it: %s", input.sessionId, error instanceof Error ? error.message : String(error));
+			}
 			const deleted = await deleteSessionDir(result.header, services.persistence) ? 1 : 0;
 			if (deleted === 1) {
 				const location = services.persistence.locate(result.header);
 				if (location !== void 0) await pruneEmptyProjectDir(path.dirname(path.dirname(location.path)));
-				log.info("[clear-session-history] deleted session log %s", result.header.id);
+				log.info("[clear-session-history] deleted session log %s%s", result.header.id, attached ? " (archived to hide)" : "");
 			}
 			return {
 				ok: true,

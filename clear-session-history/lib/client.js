@@ -96,7 +96,7 @@ window.__ModuleLoader__.load({
 				if (previewFailed) return `Could not check the session logs on disk: ${previewError ?? "unknown error"}`;
 				if (previewPending) return request.mode === "session" ? "Checking this session…" : "Counting the session logs stored on disk…";
 				if (nothingToDelete) {
-					if (request.mode === "session") return counts.kept > 0 ? `This session is currently open (or needed by an open session) and can't be deleted. It stays on disk.` : `No session log was found on disk for "${sessionName}". There is nothing to delete.`;
+					if (request.mode === "session") return counts.kept > 0 ? `This session is currently running (an agent turn is in flight), so it can't be deleted yet. Try again once it finishes.` : `No session log was found on disk for "${sessionName}". There is nothing to delete.`;
 					return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`;
 				}
 				if (request.mode === "session") return `This permanently deletes the session log for "${sessionName}" from disk. The workspace and its other sessions are untouched.`;
