@@ -15,7 +15,15 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const pluginDir = new URL('..', import.meta.url).pathname
-const pnpm = '/Users/n0pe-sled/Research/deepseek-harness/node_modules/.pnpm'
+// The harness checkout supplies jsdom/react for this local dev harness test.
+// Point it at the checkout, e.g.:
+//   DSH_CLEAR_HISTORY_HARNESS=/path/to/deepseek-harness node tests/client-session-flow.mjs
+const harness = process.env.DSH_CLEAR_HISTORY_HARNESS ?? ''
+if (harness === '') {
+  console.error('set DSH_CLEAR_HISTORY_HARNESS to a deepseek-harness checkout to run the client flow test')
+  process.exit(0)
+}
+const pnpm = `${harness}/node_modules/.pnpm`
 const reactStore = `${pnpm}/react@18.3.1/node_modules/react`
 const reactDomStore = `${pnpm}/react-dom@18.3.1_react@18.3.1/node_modules/react-dom`
 const jsdomStore = `${pnpm}/jsdom@29.1.1/node_modules/jsdom`
