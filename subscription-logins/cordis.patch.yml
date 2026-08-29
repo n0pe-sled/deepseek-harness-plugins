@@ -1,0 +1,9 @@
+# Mount the authorization seam that llm-pi-ai watches, then mount this bundle's
+# host bridge and browser Settings page. Both rows stay outside harness core.
+
+- insert:
+    - id: subscription-authorization
+      name: '@deepseek-ai/dsh-authorization'
+
+    - id: subscription-logins
+      name: dsh-subscription-logins
