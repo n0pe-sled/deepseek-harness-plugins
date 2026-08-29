@@ -10,9 +10,10 @@
  *
  * A workspace-menu clear targets a workspace by display title
  * (+ occurrence among same-titled rows); the clear-all button targets all
- * workspaces; a session-menu delete targets one session by id, which this
- * module resolves from the DOM row (workspace group + row index) against the
- * client session/workspace stores, since session ids never reach the DOM.
+ * workspaces; a session-menu delete targets one session by id, read from the
+ * clicked row's React fiber (the row component's `node.id` prop) with a
+ * store-based title match as fallback, since session ids never reach DOM
+ * attributes.
  *
  * Export discipline (packages/client/AGENTS.md): the ./client entry exports
  * only `apply`/`inject` and shared types.
@@ -75,20 +76,34 @@ export function apply(ctx: ClientContext): void {
 
   // Duck-typed faces of the client session/workspace stores (the concrete
   // runtimes expose snapshots; the interfaces keep them hidden).
-  interface ClientSessions { list: { getSnapshot(): { byId: Record<string, { title?: string }>; ids: string[] } } }
+  interface SessionRowLike {
+    title?: string
+    displayTitle?: string
+    blank?: boolean
+    origin?: 'subagent'
+    updatedAt?: number
+  }
+  interface ClientSessions {
+    list: { getSnapshot(): { byId: Record<string, SessionRowLike>; ids: string[]; current?: string } }
+  }
   interface ClientWorkspaces {
     list: { getSnapshot(): { items: { title: string; sessionIds: string[] }[]; archivedSessionIds: string[] } }
   }
 
   /**
-   * Resolve a session row to its id. The sidebar renders each workspace
-   * group's rows in `workspace.sessionIds` order, skipping ids with no
-   * summary (deleted) and archived ids — the same filtering this function
-   * applies, so the clicked row's DOM index into the group still addresses
-   * the account. The session title double-checks the match. Ungrouped rows
-   * match by title among sessions no workspace owns, in list order.
+   * Resolve a session row to its id. The row's React fiber usually yielded
+   * the exact id at arming time (`target.sessionId`); this store-based path
+   * is the fallback. It mirrors the ui-workspace tree derivation's
+   * visibility rule (a row renders only when its summary exists, it is not
+   * archived, not subagent-origin, and not a blank session other than the
+   * current one) and matches on the title the sidebar actually displays
+   * (`displayTitle`, durable `title` as a last resort). Same-titled rows
+   * disambiguate by `sameTitleIndex` over candidates in recency order — the
+   * sidebar's default `updated` sort. A manually re-sorted sidebar can
+   * defeat that index, which is why the fiber id comes first.
    */
   const resolveSessionId = (target: SessionTarget): string | undefined => {
+    if (target.sessionId !== undefined) return target.sessionId
     const sessions = (ctx as unknown as { sessions?: ClientSessions }).sessions
     const workspaces = (ctx as unknown as { workspaces?: ClientWorkspaces }).workspaces
     const state = sessions?.list?.getSnapshot()
@@ -96,24 +111,35 @@ export function apply(ctx: ClientContext): void {
     if (state === undefined || wsState === undefined) return undefined
 
     const archived = new Set(wsState.archivedSessionIds)
-    const visible = (ids: string[]) => ids
-      .filter(id => state.byId[id] !== undefined && !archived.has(id))
+    const rowVisible = (id: string): boolean => {
+      const summary = state.byId[id]
+      if (summary === undefined || archived.has(id)) return false
+      if (summary.origin === 'subagent') return false
+      return summary.blank !== true || id === state.current
+    }
+    const shownTitle = (id: string): string | undefined => {
+      const summary = state.byId[id]
+      return summary?.displayTitle ?? summary?.title
+    }
+    const pick = (ids: readonly string[]): string | undefined => {
+      const candidates = ids.filter(id => rowVisible(id) && shownTitle(id) === target.sessionTitle)
+      if (candidates.length === 1) return candidates[0]
+      const byRecency = [...candidates].sort((a, b) => {
+        const delta = (state.byId[b]?.updatedAt ?? 0) - (state.byId[a]?.updatedAt ?? 0)
+        return delta !== 0 ? delta : a < b ? -1 : 1
+      })
+      return byRecency[target.sameTitleIndex]
+    }
 
     if (target.workspaceTitle === null) {
       const assigned = new Set(wsState.items.flatMap(workspace => workspace.sessionIds))
-      const bare = visible(state.ids).filter(id => !assigned.has(id))
-      const candidates = bare.filter(id => state.byId[id]?.title === target.sessionTitle)
-      return candidates[target.rowIndex]
+      return pick(state.ids.filter(id => !assigned.has(id)))
     }
 
     const sameTitle = wsState.items.filter(workspace => workspace.title === target.workspaceTitle)
     const workspace = sameTitle[target.workspaceOccurrence] ?? sameTitle[0]
     if (workspace === undefined) return undefined
-    const account = visible(workspace.sessionIds)
-    const byIndex = account[target.rowIndex]
-    if (byIndex !== undefined && state.byId[byIndex]?.title === target.sessionTitle) return byIndex
-    const byTitle = account.filter(id => state.byId[id]?.title === target.sessionTitle)
-    return byTitle[target.rowIndex]
+    return pick(workspace.sessionIds)
   }
 
   // React root for the confirm dialog. The container is never appended: the

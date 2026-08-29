@@ -98,10 +98,16 @@ wsAnchor.setAttribute('aria-label', 'Workspace actions for w1')
 header.appendChild(wsAnchor)
 group.appendChild(header)
 
+// DOM rows in the sidebar's default 'updated' order (recency), which is NOT
+// the workspace account order below — the resolver must not assume account
+// order. 'Beta' appears twice to exercise same-title disambiguation, and the
+// store rows carry displayTitle (durable title absent), matching the real
+// SessionSummary shape for sessions without a projected title.
 const ROWS = [
-  { id: 'sA', title: 'Alpha' },
-  { id: 'sB', title: 'Beta' },
-  { id: 'sC', title: 'Gamma' },
+  { id: 'sC', title: 'Gamma', updatedAt: 300 },
+  { id: 'sB', title: 'Beta', updatedAt: 200 },
+  { id: 'sB2', title: 'Beta', updatedAt: 150 },
+  { id: 'sA', title: 'Alpha', updatedAt: 100 },
 ]
 const rowEls = {}
 for (const row of ROWS) {
@@ -124,9 +130,12 @@ tree.appendChild(group)
 body.appendChild(tree)
 
 // ---- Stub ctx --------------------------------------------------------------
-const sessionIdByTitle = { Alpha: 'sA', Beta: 'sB', Gamma: 'sC' }
+// Store rows carry displayTitle + updatedAt only (no durable title), like a
+// real session whose title projection has not landed. Account order differs
+// from DOM order on purpose.
 const byId = {}
-for (const row of ROWS) byId[row.id] = { title: row.title }
+for (const row of ROWS) byId[row.id] = { displayTitle: row.title, updatedAt: row.updatedAt }
+const accountOrder = ['sA', 'sB2', 'sB', 'sC']
 
 const captured = { previewSessionInput: null }
 const remoteNamespace = {
@@ -149,20 +158,19 @@ const ctx = {
   effect: () => () => {},
   sessions: { list: { getSnapshot: () => ({ byId, ids: ROWS.map(r => r.id) }) } },
   workspaces: {
-    list: { getSnapshot: () => ({ items: [{ title: 'w1', sessionIds: ROWS.map(r => r.id) }], archivedSessionIds: [] }) },
+    list: { getSnapshot: () => ({ items: [{ title: 'w1', sessionIds: accountOrder }], archivedSessionIds: [] }) },
   },
 }
 apply(ctx)
 
-// ---- Drive: pointerdown on the Beta row's "…" ------------------------------
-try {
-  const betaAnchor = rowEls.sB.anchor
-  betaAnchor.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, composed: true }))
+// ---- Drive one delete: pointerdown on a row's "…", portal menu, click -------
+async function driveDelete(anchor) {
+  captured.previewSessionInput = null
+  anchor.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, composed: true }))
 
-  // ---- The session menu portals open ----------------------------------------
   const menu = window.document.createElement('div')
   menu.setAttribute('role', 'menu')
-  for (const [id, label] of [['rename', 'Rename'], ['fork', 'Fork session'], ['archive', 'Archive session']]) {
+  for (const label of ['Rename', 'Fork session', 'Archive session']) {
     const item = window.document.createElement('button')
     item.setAttribute('role', 'menuitem')
     const w = window.document.createElement('div')
@@ -180,20 +188,53 @@ try {
   }
   body.appendChild(menu)
 
-  // ---- Let microtasks settle, then click the injected Delete session row ------
+  // Let microtasks settle, then click the injected Delete session row.
   await new Promise(r => setTimeout(r, 30))
   const deleteRow = menu.querySelector('[data-dsh-clear-session]')
   assert.ok(deleteRow !== null, 'Delete session row must be injected into the session menu')
   assert.equal(deleteRow.getAttribute('aria-label'), 'Delete session')
 
   deleteRow.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
-
   await new Promise(r => setTimeout(r, 30))
+  menu.remove()
+  return captured.previewSessionInput
+}
+
+try {
+  // 1. Store fallback, unique title: DOM order (recency) differs from the
+  //    account order, and the store rows only carry displayTitle.
   assert.deepEqual(
-    captured.previewSessionInput,
-    { sessionId: 'sB' },
-    'dialog must act on the resolved Beta session id',
+    await driveDelete(rowEls.sA.anchor),
+    { sessionId: 'sA' },
+    'unique-title fallback must resolve Alpha by displayTitle, not account index',
   )
+
+  // 2. Store fallback, duplicate title: the second visible Beta row must
+  //    resolve to the second-most-recent Beta.
+  assert.deepEqual(
+    await driveDelete(rowEls.sB2.anchor),
+    { sessionId: 'sB2' },
+    'same-title fallback must resolve the second Beta row by recency index',
+  )
+  assert.deepEqual(
+    await driveDelete(rowEls.sB.anchor),
+    { sessionId: 'sB' },
+    'same-title fallback must resolve the first Beta row by recency index',
+  )
+
+  // 3. Fiber path: a row exposing a React fiber chain resolves by node.id
+  //    even when the store could not (id absent from every store row).
+  const gammaRow = rowEls.sC.el
+  gammaRow['__reactFiber$test'] = {
+    memoizedProps: {},
+    return: { memoizedProps: { node: { id: 'sFiber', title: 'Gamma' } }, return: null },
+  }
+  assert.deepEqual(
+    await driveDelete(rowEls.sC.anchor),
+    { sessionId: 'sFiber' },
+    'a row with a React fiber must resolve by the fiber node id',
+  )
+
   console.log('client session flow: all assertions passed')
   process.exit(0)
 } catch (error) {

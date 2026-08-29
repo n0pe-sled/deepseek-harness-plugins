@@ -39,12 +39,16 @@ export interface ClearDialogRequest {
  * through the client stores. */
 export interface SessionTarget {
   sessionTitle: string
+  /** The session id read from the row's React fiber (`node.id`); the exact
+   * target when present. The store-based fields below are the fallback. */
+  sessionId?: string
   /** The enclosing workspace group's title, or null for an ungrouped row. */
   workspaceTitle: string | null
   /** Index of the group among registry workspaces sharing its title. */
   workspaceOccurrence: number
-  /** Index of the row within its group (== index in `workspace.sessionIds`). */
-  rowIndex: number
+  /** Index of the row among the group's rows sharing its title (DOM order).
+   * Disambiguates same-titled sessions in the store fallback. */
+  sameTitleIndex: number
 }
 
 export interface SidebarIntegrationOptions {
@@ -111,6 +115,35 @@ function sessionTitleOf(label: string): string | undefined {
 
 const itemText = (button: HTMLButtonElement): string => (button.textContent ?? '').trim()
 
+/**
+ * Read the session id straight from the React fiber that rendered the row.
+ * The session row component receives its tree node as a `node` prop carrying
+ * the session id (ui-workspace `SessionNode`), and React 18 exposes the host
+ * element's fiber under a `__reactFiber$<hash>` own property. Walking the
+ * `return` chain from the row element finds that component's props. This is
+ * exact regardless of sidebar sort order, hidden rows, or duplicate titles;
+ * it returns undefined when the internals change, and the store-based
+ * fallback takes over.
+ */
+function reactSessionIdOf(row: HTMLElement): string | undefined {
+  const key = Object.keys(row).find(candidate => candidate.startsWith('__reactFiber$'))
+  if (key === undefined) return undefined
+  type FiberLike = { return?: FiberLike | null; memoizedProps?: unknown } | null | undefined
+  let fiber = (row as unknown as Record<string, FiberLike>)[key]
+  for (let depth = 0; fiber !== undefined && fiber !== null && depth < 40; depth += 1) {
+    const props = fiber.memoizedProps
+    if (typeof props === 'object' && props !== null) {
+      const node = (props as { node?: unknown }).node
+      if (typeof node === 'object' && node !== null) {
+        const id = (node as { id?: unknown }).id
+        if (typeof id === 'string' && id !== '') return id
+      }
+    }
+    fiber = fiber.return
+  }
+  return undefined
+}
+
 /** A minimal 16px trash glyph that inherits currentColor from the danger rules. */
 const TRASH_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/></svg>'
@@ -153,10 +186,21 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
         break
       }
     }
-    const sessions = group === null
+    // Same-title index in DOM order: among the group's rows whose session
+    // anchor carries the same title, which one was clicked. The DOM is the
+    // one place that reflects the user's actual sort order.
+    const rows = group === null
       ? [row]
       : [...group.querySelectorAll<HTMLElement>('[role="treeitem"][aria-selected]')]
-    const rowIndex = Math.max(0, sessions.indexOf(row))
+    const titleOfRow = (candidate: HTMLElement): string | undefined => {
+      for (const anchor of candidate.querySelectorAll<HTMLButtonElement>('button[aria-label]')) {
+        const anchorTitle = sessionTitleOf(anchor.getAttribute('aria-label') ?? '')
+        if (anchorTitle !== undefined) return anchorTitle
+      }
+      return undefined
+    }
+    const sameTitled = rows.filter(candidate => titleOfRow(candidate) === sessionTitle)
+    const sameTitleIndex = Math.max(0, sameTitled.indexOf(row))
     let workspaceOccurrence = 0
     let groupWorkspaceTitle: string | null = null
     if (group !== null) {
@@ -169,13 +213,15 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
         workspaceOccurrence = Math.max(0, same.indexOf(anchor))
       }
     }
+    const sessionId = reactSessionIdOf(row)
     armed = {
       kind: 'session',
       target: {
         sessionTitle,
+        ...(sessionId === undefined ? {} : { sessionId }),
         workspaceTitle: groupWorkspaceTitle,
         workspaceOccurrence,
-        rowIndex,
+        sameTitleIndex,
       },
       at: Date.now(),
     }

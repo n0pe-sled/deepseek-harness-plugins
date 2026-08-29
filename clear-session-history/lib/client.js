@@ -204,6 +204,32 @@ window.__ModuleLoader__.load({
 			return title === void 0 || title === "" ? void 0 : title;
 		}
 		const itemText = (button) => (button.textContent ?? "").trim();
+		/**
+		* Read the session id straight from the React fiber that rendered the row.
+		* The session row component receives its tree node as a `node` prop carrying
+		* the session id (ui-workspace `SessionNode`), and React 18 exposes the host
+		* element's fiber under a `__reactFiber$<hash>` own property. Walking the
+		* `return` chain from the row element finds that component's props. This is
+		* exact regardless of sidebar sort order, hidden rows, or duplicate titles;
+		* it returns undefined when the internals change, and the store-based
+		* fallback takes over.
+		*/
+		function reactSessionIdOf(row) {
+			const key = Object.keys(row).find((candidate) => candidate.startsWith("__reactFiber$"));
+			if (key === void 0) return void 0;
+			let fiber = row[key];
+			for (let depth = 0; fiber !== void 0 && fiber !== null && depth < 40; depth += 1) {
+				const props = fiber.memoizedProps;
+				if (typeof props === "object" && props !== null) {
+					const node = props.node;
+					if (typeof node === "object" && node !== null) {
+						const id = node.id;
+						if (typeof id === "string" && id !== "") return id;
+					}
+				}
+				fiber = fiber.return;
+			}
+		}
 		/** A minimal 16px trash glyph that inherits currentColor from the danger rules. */
 		const TRASH_ICON_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\" width=\"16\" height=\"16\" aria-hidden=\"true\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0\"/></svg>";
 		function installSidebarIntegration(options) {
@@ -236,8 +262,15 @@ window.__ModuleLoader__.load({
 						break;
 					}
 				}
-				const sessions = group === null ? [row] : [...group.querySelectorAll("[role=\"treeitem\"][aria-selected]")];
-				const rowIndex = Math.max(0, sessions.indexOf(row));
+				const rows = group === null ? [row] : [...group.querySelectorAll("[role=\"treeitem\"][aria-selected]")];
+				const titleOfRow = (candidate) => {
+					for (const anchor of candidate.querySelectorAll("button[aria-label]")) {
+						const anchorTitle = sessionTitleOf(anchor.getAttribute("aria-label") ?? "");
+						if (anchorTitle !== void 0) return anchorTitle;
+					}
+				};
+				const sameTitled = rows.filter((candidate) => titleOfRow(candidate) === sessionTitle);
+				const sameTitleIndex = Math.max(0, sameTitled.indexOf(row));
 				let workspaceOccurrence = 0;
 				let groupWorkspaceTitle = null;
 				if (group !== null) {
@@ -249,13 +282,15 @@ window.__ModuleLoader__.load({
 						workspaceOccurrence = Math.max(0, same.indexOf(anchor));
 					}
 				}
+				const sessionId = reactSessionIdOf(row);
 				armed = {
 					kind: "session",
 					target: {
 						sessionTitle,
+						...sessionId === void 0 ? {} : { sessionId },
 						workspaceTitle: groupWorkspaceTitle,
 						workspaceOccurrence,
-						rowIndex
+						sameTitleIndex
 					},
 					at: Date.now()
 				};
@@ -542,9 +577,10 @@ window.__ModuleLoader__.load({
 		*
 		* A workspace-menu clear targets a workspace by display title
 		* (+ occurrence among same-titled rows); the clear-all button targets all
-		* workspaces; a session-menu delete targets one session by id, which this
-		* module resolves from the DOM row (workspace group + row index) against the
-		* client session/workspace stores, since session ids never reach the DOM.
+		* workspaces; a session-menu delete targets one session by id, read from the
+		* clicked row's React fiber (the row component's `node.id` prop) with a
+		* store-based title match as fallback, since session ids never reach DOM
+		* attributes.
 		*
 		* Export discipline (packages/client/AGENTS.md): the ./client entry exports
 		* only `apply`/`inject` and shared types.
@@ -583,32 +619,51 @@ window.__ModuleLoader__.load({
 				}
 			};
 			/**
-			* Resolve a session row to its id. The sidebar renders each workspace
-			* group's rows in `workspace.sessionIds` order, skipping ids with no
-			* summary (deleted) and archived ids — the same filtering this function
-			* applies, so the clicked row's DOM index into the group still addresses
-			* the account. The session title double-checks the match. Ungrouped rows
-			* match by title among sessions no workspace owns, in list order.
+			* Resolve a session row to its id. The row's React fiber usually yielded
+			* the exact id at arming time (`target.sessionId`); this store-based path
+			* is the fallback. It mirrors the ui-workspace tree derivation's
+			* visibility rule (a row renders only when its summary exists, it is not
+			* archived, not subagent-origin, and not a blank session other than the
+			* current one) and matches on the title the sidebar actually displays
+			* (`displayTitle`, durable `title` as a last resort). Same-titled rows
+			* disambiguate by `sameTitleIndex` over candidates in recency order — the
+			* sidebar's default `updated` sort. A manually re-sorted sidebar can
+			* defeat that index, which is why the fiber id comes first.
 			*/
 			const resolveSessionId = (target) => {
+				if (target.sessionId !== void 0) return target.sessionId;
 				const sessions = ctx.sessions;
 				const workspaces = ctx.workspaces;
 				const state = sessions?.list?.getSnapshot();
 				const wsState = workspaces?.list?.getSnapshot();
 				if (state === void 0 || wsState === void 0) return void 0;
 				const archived = new Set(wsState.archivedSessionIds);
-				const visible = (ids) => ids.filter((id) => state.byId[id] !== void 0 && !archived.has(id));
+				const rowVisible = (id) => {
+					const summary = state.byId[id];
+					if (summary === void 0 || archived.has(id)) return false;
+					if (summary.origin === "subagent") return false;
+					return summary.blank !== true || id === state.current;
+				};
+				const shownTitle = (id) => {
+					const summary = state.byId[id];
+					return summary?.displayTitle ?? summary?.title;
+				};
+				const pick = (ids) => {
+					const candidates = ids.filter((id) => rowVisible(id) && shownTitle(id) === target.sessionTitle);
+					if (candidates.length === 1) return candidates[0];
+					return [...candidates].sort((a, b) => {
+						const delta = (state.byId[b]?.updatedAt ?? 0) - (state.byId[a]?.updatedAt ?? 0);
+						return delta !== 0 ? delta : a < b ? -1 : 1;
+					})[target.sameTitleIndex];
+				};
 				if (target.workspaceTitle === null) {
 					const assigned = new Set(wsState.items.flatMap((workspace) => workspace.sessionIds));
-					return visible(state.ids).filter((id) => !assigned.has(id)).filter((id) => state.byId[id]?.title === target.sessionTitle)[target.rowIndex];
+					return pick(state.ids.filter((id) => !assigned.has(id)));
 				}
 				const sameTitle = wsState.items.filter((workspace) => workspace.title === target.workspaceTitle);
 				const workspace = sameTitle[target.workspaceOccurrence] ?? sameTitle[0];
 				if (workspace === void 0) return void 0;
-				const account = visible(workspace.sessionIds);
-				const byIndex = account[target.rowIndex];
-				if (byIndex !== void 0 && state.byId[byIndex]?.title === target.sessionTitle) return byIndex;
-				return account.filter((id) => state.byId[id]?.title === target.sessionTitle)[target.rowIndex];
+				return pick(workspace.sessionIds);
 			};
 			const container = document.createElement("div");
 			const root = (0, react_dom_client.createRoot)(container);
