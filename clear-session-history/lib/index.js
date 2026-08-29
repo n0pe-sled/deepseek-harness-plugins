@@ -44,11 +44,12 @@ function parsePreviewOutcome(value) {
 function parseClearOutcome(value) {
 	if (!isRecord(value) || typeof value.ok !== "boolean") throw new TypeError("clear outcome must be a plain object with ok");
 	if (value.ok) {
-		if (!isNatural(value.deleted)) throw new TypeError("clear outcome ok result must carry a natural deleted count");
+		if (!isNatural(value.deleted) || !isNatural(value.removed)) throw new TypeError("clear outcome ok result must carry natural deleted and removed counts");
 		const counts = parseClearCounts(value);
 		return {
 			ok: true,
 			deleted: value.deleted,
+			removed: value.removed,
 			targets: counts.targets,
 			kept: counts.kept
 		};
@@ -112,11 +113,20 @@ const DESCRIPTORS = [descriptor("preview", PREVIEW_OUTCOME_SCHEMA), descriptor("
 *     its parent matches the backend's project-key shape, so a degenerate
 *     `locate()` result can never widen into a recursive wipe.
 *
-* Registry bookkeeping needs no surgery: `workspace.list` rows keep stale
-* session ids, but the sidebar joins membership against `session.list` (read
-* fresh from persistence) and skips ids without a summary, so deleted
-* sessions disappear from the tree; the stale ids are filtered on the next
-* host start and remain invisible until then.
+* Registry bookkeeping needs no surgery for the session rows: `workspace.list`
+* rows keep stale session ids, but the sidebar joins membership against
+* `session.list` (read fresh from persistence) and skips ids without a summary,
+* so deleted sessions disappear from the tree; the stale ids are filtered on
+* the next host start and remain invisible until then.
+*
+* Workspace rows are treated differently: once a clear has removed every
+* targeted session log, the clear also deletes the workspace registration(s)
+* (`$DSH_HOME/storages/workspace.json`) so the workspace disappears from the
+* sidebar too. A per-workspace clear removes that one workspace; a clear-all
+* removes every workspace. If only part of a clear succeeded the registration
+* is kept, so leftover logs stay grouped instead of being orphaned. Any
+* currently-open session that belonged to a removed workspace moves to the
+* Ungrouped bucket, exactly like the app's own Delete workspace action.
 *
 * All actions flow through a runtime-registered Typert endpoint
 * (`clearSessionHistory`) consumed by the browser half; `preview` returns the
@@ -247,7 +257,10 @@ function apply(ctx) {
 		const matches = registry.list().filter((workspace) => workspace.title === input.workspaceTitle);
 		const workspace = matches[input.titleOccurrence];
 		if (workspace === void 0) return { error: matches.length === 0 ? `no workspace named "${input.workspaceTitle}" is registered` : `workspace "${input.workspaceTitle}" #${input.titleOccurrence + 1} is not registered (${matches.length} share that title)` };
-		return { workspace };
+		return { workspace: {
+			id: workspace.id,
+			path: workspace.path
+		} };
 	};
 	/** Delete one target's directory after re-checking the shape on disk. */
 	const deleteSessionDir = async (header, persistence) => {
@@ -287,12 +300,14 @@ function apply(ctx) {
 		if (resolved.workspace === void 0) return {
 			ok: true,
 			persistence: services.persistence,
-			sessions: services.sessions
+			sessions: services.sessions,
+			registry: services.registry
 		};
 		return {
 			ok: true,
 			persistence: services.persistence,
 			sessions: services.sessions,
+			registry: services.registry,
 			workspace: resolved.workspace
 		};
 	};
@@ -324,7 +339,7 @@ function apply(ctx) {
 			ok: false,
 			error: prepared.error
 		};
-		const { persistence, sessions, workspace } = prepared;
+		const { persistence, sessions, registry, workspace } = prepared;
 		try {
 			const scope = await scanScope(persistence, sessions, workspace);
 			const touchedProjects = /* @__PURE__ */ new Set();
@@ -350,12 +365,26 @@ function apply(ctx) {
 				}
 				for (const project of touchedProjects) if (!remainingProjects.has(project)) await pruneEmptyProjectDir(project);
 			}
-			log.info("[clear-session-history] cleared %d session log(s) (kept %d, unresolved %d, scope %s)", deleted, scope.kept, unresolved, workspace === void 0 ? "all workspaces" : `"${input.workspaceTitle}"`);
+			let removed = 0;
+			if (deleted === scope.targets.length && scope.targets.length > 0) {
+				if (workspace !== void 0) try {
+					if (await registry.delete(workspace.id)) removed = 1;
+				} catch (error) {
+					log.warn("[clear-session-history] failed to remove workspace %s: %s", workspace.id, error instanceof Error ? error.message : String(error));
+				}
+				else for (const row of registry.list()) try {
+					if (await registry.delete(row.id)) removed += 1;
+				} catch (error) {
+					log.warn("[clear-session-history] failed to remove workspace %s: %s", row.id, error instanceof Error ? error.message : String(error));
+				}
+			}
+			log.info("[clear-session-history] cleared %d session log(s) (kept %d, unresolved %d, removed %d workspace(s), scope %s)", deleted, scope.kept, unresolved, removed, workspace === void 0 ? "all workspaces" : `"${input.workspaceTitle}"`);
 			return {
 				ok: true,
 				deleted,
 				targets: scope.targets.length,
-				kept: scope.kept
+				kept: scope.kept,
+				removed
 			};
 		} catch (error) {
 			return {

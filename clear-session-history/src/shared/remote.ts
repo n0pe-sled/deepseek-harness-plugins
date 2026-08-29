@@ -49,9 +49,10 @@ export type PreviewOutcome =
   | { readonly ok: true; readonly targets: number; readonly kept: number }
   | { readonly ok: false; readonly error: string }
 
-/** Result of clear: how many logs were removed, plus the kept count. */
+/** Result of clear: how many logs were removed, the kept count, and how many
+ * workspace registrations were dropped when the clear emptied them. */
 export type ClearOutcome =
-  | ({ readonly ok: true; readonly deleted: number } & ClearCounts)
+  | ({ readonly ok: true; readonly deleted: number; readonly removed: number } & ClearCounts)
   | { readonly ok: false; readonly error: string }
 
 /** Client-side unwrapped result of one Remote call. */
@@ -108,9 +109,11 @@ function parseClearOutcome(value: unknown): ClearOutcome {
     throw new TypeError('clear outcome must be a plain object with ok')
   }
   if (value.ok) {
-    if (!isNatural(value.deleted)) throw new TypeError('clear outcome ok result must carry a natural deleted count')
+    if (!isNatural(value.deleted) || !isNatural(value.removed)) {
+      throw new TypeError('clear outcome ok result must carry natural deleted and removed counts')
+    }
     const counts = parseClearCounts(value)
-    return { ok: true, deleted: value.deleted, targets: counts.targets, kept: counts.kept }
+    return { ok: true, deleted: value.deleted, removed: value.removed, targets: counts.targets, kept: counts.kept }
   }
   if (typeof value.error !== 'string') throw new TypeError('clear outcome error must be a string')
   return { ok: false, error: value.error }

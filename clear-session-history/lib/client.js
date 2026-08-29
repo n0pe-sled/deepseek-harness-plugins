@@ -24,7 +24,13 @@ window.__ModuleLoader__.load({
 			targets: 0,
 			kept: 0
 		};
-		function ClearHistoryDialog({ register, onPreview, onClear, onCleared }) {
+		/** The acknowledgement line, wording the workspace removal per mode. */
+		function resolveAcknowledge(counts, pending, failed, nothing, mode) {
+			if (nothing || pending || failed) return "I understand this action deletes session logs from disk.";
+			const removal = mode === "workspace" ? "the workspace is removed from the sidebar" : "every workspace is removed from the sidebar";
+			return counts.targets === 1 ? `I understand this 1 session log is permanently deleted and ${removal}.` : `I understand these ${counts.targets} session logs are permanently deleted and ${removal}.`;
+		}
+		function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, onCleared }) {
 			const [request, setRequest] = (0, react.useState)(null);
 			const [preview, setPreview] = (0, react.useState)(null);
 			const [busy, setBusy] = (0, react.useState)(false);
@@ -77,7 +83,8 @@ window.__ModuleLoader__.load({
 				if (nothingToDelete) return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`;
 				const noun = counts.targets === 1 ? "session log" : "session logs";
 				const keptNote = counts.kept > 0 ? ` Sessions that are currently open (and their running subagents) are kept: ${counts.kept}.` : " Sessions that are currently open are kept.";
-				return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}.${keptNote}`;
+				const removedNote = request.mode === "workspace" ? ` and removes the workspace from the sidebar` : " and removes every workspace from the sidebar";
+				return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}${removedNote}.${keptNote}`;
 			})();
 			const confirmLabel = previewPending || previewFailed ? "Delete" : counts.targets === 1 ? "Delete 1 session log" : `Delete ${counts.targets} session logs`;
 			const confirm = () => {
@@ -99,19 +106,18 @@ window.__ModuleLoader__.load({
 						return;
 					}
 					if (counts.deleted < counts.targets) {
-						setResult(`Deleted ${counts.deleted} of ${counts.targets} session logs. The rest could not be resolved to safe on-disk directories.`);
+						setResult(`Deleted ${counts.deleted} of ${counts.targets} session logs. The rest could not be resolved to safe on-disk directories, so the workspace was kept.`);
 						onCleared();
 						return;
 					}
-					onCleared();
-					close();
+					onSuccess();
 				});
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.RiskConfirmation, {
 				open: true,
 				title: request.mode === "workspace" ? "Clear session history" : "Clear all session history",
 				description: failure !== null ? `Delete failed: ${failure}` : result !== null ? result : description,
-				acknowledgeLabel: nothingToDelete || previewPending || previewFailed ? "I understand this action deletes session logs from disk." : counts.targets === 1 ? "I understand this 1 session log will be permanently deleted from disk." : `I understand these ${counts.targets} session logs will be permanently deleted from disk.`,
+				acknowledgeLabel: resolveAcknowledge(counts, previewPending, previewFailed, nothingToDelete, request.mode),
 				cancelLabel: "Cancel",
 				confirmLabel,
 				acknowledged,
@@ -331,11 +337,12 @@ window.__ModuleLoader__.load({
 		function parseClearOutcome(value) {
 			if (!isRecord(value) || typeof value.ok !== "boolean") throw new TypeError("clear outcome must be a plain object with ok");
 			if (value.ok) {
-				if (!isNatural(value.deleted)) throw new TypeError("clear outcome ok result must carry a natural deleted count");
+				if (!isNatural(value.deleted) || !isNatural(value.removed)) throw new TypeError("clear outcome ok result must carry natural deleted and removed counts");
 				const counts = parseClearCounts(value);
 				return {
 					ok: true,
 					deleted: value.deleted,
+					removed: value.removed,
 					targets: counts.targets,
 					kept: counts.kept
 				};
@@ -426,11 +433,19 @@ window.__ModuleLoader__.load({
 			const container = document.createElement("div");
 			const root = (0, react_dom_client.createRoot)(container);
 			const apiRef = { current: null };
-			/** Repull the sidebar session list after a clear. The runtime exposes the
-			* refresh on the concrete face but not on the ISessions interface, so the
-			* call is duck-typed and simply skipped when absent. */
+			/** Repull the sidebar session list, best-effort, for partial clears. The
+			* runtime exposes the refresh on the concrete face but not on the ISessions
+			* interface, so the call is duck-typed and simply skipped when absent. */
 			const refreshSidebar = () => {
 				ctx.sessions?.refresh?.()?.catch(() => {});
+			};
+			/** After a fully successful clear, reload the page. The host has no
+			* "session deleted" push event to notify the sidebar, and the safest way to
+			* guarantee both the session list and the workspace list reflect the
+			* deletion (including the removed workspace registration) is a fresh pull —
+			* the same outcome as the manual reload that already verified the delete. */
+			const reloadAfterClear = () => {
+				window.location.reload();
 			};
 			installSidebarIntegration({ openDialog: (request) => {
 				apiRef.current?.open(request);
@@ -441,6 +456,7 @@ window.__ModuleLoader__.load({
 				},
 				onPreview: (input) => call((ns) => ns.preview, input),
 				onClear: (input) => call((ns) => ns.clear, input),
+				onSuccess: reloadAfterClear,
 				onCleared: refreshSidebar
 			}));
 			ctx.effect(() => () => {

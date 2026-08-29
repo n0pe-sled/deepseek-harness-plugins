@@ -66,12 +66,21 @@ export function apply(ctx: ClientContext): void {
   const root = createRoot(container)
   const apiRef: { current: DialogApi | null } = { current: null }
 
-  /** Repull the sidebar session list after a clear. The runtime exposes the
-   * refresh on the concrete face but not on the ISessions interface, so the
-   * call is duck-typed and simply skipped when absent. */
+  /** Repull the sidebar session list, best-effort, for partial clears. The
+   * runtime exposes the refresh on the concrete face but not on the ISessions
+   * interface, so the call is duck-typed and simply skipped when absent. */
   const refreshSidebar = (): void => {
     const sessions = (ctx as unknown as { sessions?: { refresh?: () => Promise<unknown> } }).sessions
     sessions?.refresh?.()?.catch(() => {})
+  }
+
+  /** After a fully successful clear, reload the page. The host has no
+   * "session deleted" push event to notify the sidebar, and the safest way to
+   * guarantee both the session list and the workspace list reflect the
+   * deletion (including the removed workspace registration) is a fresh pull —
+   * the same outcome as the manual reload that already verified the delete. */
+  const reloadAfterClear = (): void => {
+    window.location.reload()
   }
 
   installSidebarIntegration({
@@ -82,6 +91,7 @@ export function apply(ctx: ClientContext): void {
     register: api => { apiRef.current = api },
     onPreview: input => call(ns => ns.preview, input),
     onClear: input => call(ns => ns.clear, input),
+    onSuccess: reloadAfterClear,
     onCleared: refreshSidebar,
   }))
 

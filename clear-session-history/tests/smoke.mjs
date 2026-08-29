@@ -6,10 +6,14 @@
  *   - name / inject contract;
  *   - apply() wiring: receiver registration, typert contribution;
  *   - preview/clear scoped to one workspace: only that workspace's cold logs
- *     are deleted; the live session and its cold subagent are kept;
- *   - clear-all: orphaned no-cwd logs go, protected lineages survive;
+ *     are deleted; the live session and its cold subagent are kept; a fully
+ *     cleared workspace is removed from the registry;
+ *   - clear-all: orphaned no-cwd logs go, protected lineages survive, every
+ *     remaining workspace registration is removed;
  *   - workspace resolution: unknown titles fail soft, occurrence picks the
- *     right row among same-titled workspaces.
+ *     right row among same-titled workspaces;
+ *   - a partial clear (unresolvable logs) never removes the workspace;
+ *   - missing-service failures fail soft.
  *
  * Run with: node tests/smoke.mjs
  */
@@ -59,25 +63,39 @@ const HEADERS = [
   { id: 'session-orphan-5555' },
 ]
 
-/** Persistence stub resolving artifact paths inside the fake root. */
+/** Persistence stub resolving artifact paths inside the fake root. list()
+ * re-reads the disk mirror the real backend does, so deleted logs drop out. */
 function makePersistence(root) {
   const dirFor = (header) => {
     const project = header.cwd === undefined ? '_no-cwd' : '--Users-test-ws--'
     return join(root, project, header.id)
   }
+  const logPath = header => join(dirFor(header), 'session.jsonl.zstd')
   return {
-    list: async () => HEADERS,
-    locate: header => ({ kind: 'jsonl', path: join(dirFor(header), 'session.jsonl.zstd') }),
+    list: async () => HEADERS.filter(header => existsSync(logPath(header))),
+    locate: header => ({ kind: 'jsonl', path: logPath(header) }),
   }
 }
 
 const SESSIONS = { list: () => [{ id: 'session-live-3333' }] }
-const REGISTRY = {
-  list: () => [
-    { id: 'ws-1', path: '/Users/test/ws', title: 'ws' },
-    { id: 'ws-2', path: '/Users/test/ws2', title: 'ws' },
-  ],
+
+/** Mutable workspace registry stub tracking deletions. */
+function makeRegistry(workspaces) {
+  const deleted = new Set()
+  return {
+    deleted,
+    list: () => workspaces.filter(ws => !deleted.has(ws.id)),
+    delete: async (id) => {
+      if (deleted.has(id)) return false
+      deleted.add(id)
+      return true
+    },
+  }
 }
+const WORKSPACES = [
+  { id: 'ws-1', path: '/Users/test/ws', title: 'ws' },
+  { id: 'ws-2', path: '/Users/test/ws2', title: 'ws' },
+]
 
 const exists = (root, ...parts) => existsSync(join(root, ...parts))
 
@@ -90,10 +108,11 @@ assert.deepEqual([...plugin.inject].sort(), ['sessionPersistence', 'sessions', '
 // ---- apply wiring ---------------------------------------------------------
 
 const root = makeSessionsRoot()
+const registry = makeRegistry([...WORKSPACES])
 const { ctx, provided, contributions } = makeCtx({
   sessionPersistence: makePersistence(root),
   sessions: SESSIONS,
-  workspaceRegistry: REGISTRY,
+  workspaceRegistry: registry,
 })
 plugin.apply(ctx)
 
@@ -108,30 +127,7 @@ const wsInput = { workspaceTitle: 'ws', titleOccurrence: 0 }
 const preview = await receiver.preview(wsInput)
 assert.deepEqual(preview, { ok: true, targets: 2, kept: 2 }, 'two cold logs targeted, live + its subagent kept')
 assert.ok(exists(root, '--Users-test-ws--', 'session-aaaa-1111'), 'preview deletes nothing')
-
-// ---- clear scoped to one workspace -----------------------------------------
-
-const cleared = await receiver.clear(wsInput)
-assert.equal(cleared.ok, true)
-if (cleared.ok) {
-  assert.equal(cleared.deleted, 2)
-  assert.equal(cleared.kept, 2)
-}
-assert.ok(!exists(root, '--Users-test-ws--', 'session-aaaa-1111'), 'cold log removed')
-assert.ok(!exists(root, '--Users-test-ws--', 'session-bbbb-2222'), 'cold log removed')
-assert.ok(exists(root, '--Users-test-ws--', 'session-live-3333'), 'live log kept')
-assert.ok(exists(root, '--Users-test-ws--', 'session-sub-4444'), 'cold subagent of live kept')
-
-// ---- clear-all --------------------------------------------------------------
-
-const all = await receiver.clear({ workspaceTitle: '', titleOccurrence: 0 })
-assert.equal(all.ok, true)
-if (all.ok) {
-  assert.equal(all.deleted, 1, 'only the orphaned no-cwd log remains to delete')
-  assert.equal(all.kept, 2)
-}
-assert.ok(!exists(root, '_no-cwd', 'session-orphan-5555'), 'orphan log removed')
-assert.ok(exists(root, '--Users-test-ws--', 'session-live-3333'), 'live log survives clear-all')
+assert.equal(registry.deleted.size, 0, 'preview removes no workspace')
 
 // ---- workspace resolution failures ------------------------------------------
 
@@ -142,6 +138,35 @@ if (!unknown.ok) assert.match(unknown.error, /no workspace named/)
 const occurrence = await receiver.preview({ workspaceTitle: 'ws', titleOccurrence: 5 })
 assert.equal(occurrence.ok, false)
 if (!occurrence.ok) assert.match(occurrence.error, /not registered/)
+
+// ---- clear scoped to one workspace -----------------------------------------
+
+const cleared = await receiver.clear(wsInput)
+assert.equal(cleared.ok, true)
+if (cleared.ok) {
+  assert.equal(cleared.deleted, 2)
+  assert.equal(cleared.kept, 2)
+  assert.equal(cleared.removed, 1, 'the fully cleared workspace is removed from the registry')
+}
+assert.ok(!exists(root, '--Users-test-ws--', 'session-aaaa-1111'), 'cold log removed')
+assert.ok(!exists(root, '--Users-test-ws--', 'session-bbbb-2222'), 'cold log removed')
+assert.ok(exists(root, '--Users-test-ws--', 'session-live-3333'), 'live log kept')
+assert.ok(exists(root, '--Users-test-ws--', 'session-sub-4444'), 'cold subagent of live kept')
+assert.ok(registry.deleted.has('ws-1'), 'workspace ws-1 registration removed')
+assert.ok(!registry.deleted.has('ws-2'), 'the other workspace stays registered')
+
+// ---- clear-all --------------------------------------------------------------
+
+const all = await receiver.clear({ workspaceTitle: '', titleOccurrence: 0 })
+assert.equal(all.ok, true)
+if (all.ok) {
+  assert.equal(all.deleted, 1, 'only the orphaned no-cwd log remains to delete')
+  assert.equal(all.kept, 2)
+  assert.equal(all.removed, 1, 'the remaining workspace registration is removed')
+}
+assert.ok(!exists(root, '_no-cwd', 'session-orphan-5555'), 'orphan log removed')
+assert.ok(exists(root, '--Users-test-ws--', 'session-live-3333'), 'live log survives clear-all')
+assert.ok(registry.deleted.has('ws-2'), 'workspace ws-2 registration removed by clear-all')
 
 // ---- occurrence picks the second same-titled workspace -----------------------
 
@@ -160,10 +185,11 @@ secondPersistence.locate = (header) => {
 mkdirSync(join(secondRoot, '--Users-test-ws2--', 'session-aaaa-1111'), { recursive: true })
 writeFileSync(join(secondRoot, '--Users-test-ws2--', 'session-aaaa-1111', 'session.jsonl.zstd'), 'stub')
 
+const registry2 = makeRegistry([...WORKSPACES])
 const { ctx: ctx2, provided: provided2 } = makeCtx({
   sessionPersistence: secondPersistence,
   sessions: SESSIONS,
-  workspaceRegistry: REGISTRY,
+  workspaceRegistry: registry2,
 })
 plugin.apply(ctx2)
 const receiver2 = provided2.clearSessionHistory
@@ -176,23 +202,30 @@ assert.equal(ws2Clear.ok, true)
 if (ws2Clear.ok) assert.equal(ws2Clear.deleted, 1)
 assert.ok(!exists(secondRoot, '--Users-test-ws2--', 'session-aaaa-1111'), 'ws2 log removed')
 assert.ok(exists(secondRoot, '--Users-test-ws--', 'session-aaaa-1111'), 'ws1 log untouched')
+assert.ok(registry2.deleted.has('ws-2'), 'occurrence 1 removed ws-2')
+assert.ok(!registry2.deleted.has('ws-1'), 'occurrence 1 left ws-1 registered')
 
-// ---- degenerate locate results are refused -----------------------------------
+// ---- degenerate locate results are refused (partial clear keeps workspace) ----
 
 const hostileRoot = makeSessionsRoot()
 const hostilePersistence = {
   list: async () => [{ id: 'session-aaaa-1111', cwd: '/Users/test/ws' }],
   locate: () => ({ kind: 'jsonl', path: join(hostileRoot, 'not-a-session-dir') }),
 }
+const hostileRegistry = makeRegistry([...WORKSPACES])
 const { ctx: ctx3, provided: provided3 } = makeCtx({
   sessionPersistence: hostilePersistence,
   sessions: { list: () => [] },
-  workspaceRegistry: REGISTRY,
+  workspaceRegistry: hostileRegistry,
 })
 plugin.apply(ctx3)
 const hostile = await provided3.clearSessionHistory.clear({ workspaceTitle: 'ws', titleOccurrence: 0 })
 assert.equal(hostile.ok, true)
-if (hostile.ok) assert.equal(hostile.deleted, 0, 'shape-mismatched artifact is never deleted')
+if (hostile.ok) {
+  assert.equal(hostile.deleted, 0, 'shape-mismatched artifact is never deleted')
+  assert.equal(hostile.removed, 0, 'a partial clear never removes the workspace')
+}
+assert.equal(hostileRegistry.deleted.size, 0, 'no workspace registration touched on partial clear')
 
 // ---- missing service fails soft ----------------------------------------------
 

@@ -32,14 +32,34 @@ interface ClearHistoryDialogProps {
   onPreview(input: ClearScopeInput): Promise<RemoteCallOutcome<PreviewOutcome>>
   /** The destructive call itself. */
   onClear(input: ClearScopeInput): Promise<RemoteCallOutcome<ClearOutcome>>
-  /** Fired after a successful clear so the sidebar can repull its list. */
+  /** Fired after a fully successful clear: the plugin reloads so the fresh
+   * session and workspace lists reflect the deletion. */
+  onSuccess(): void
+  /** Fired after a partial clear so the sidebar gets a best-effort refresh. */
   onCleared(): void
 }
 
 /** A preview that never arrived (host unavailable, request lost). */
 const EMPTY_COUNTS: ClearCounts = { targets: 0, kept: 0 }
 
-export function ClearHistoryDialog({ register, onPreview, onClear, onCleared }: ClearHistoryDialogProps): JSX.Element {
+/** The acknowledgement line, wording the workspace removal per mode. */
+function resolveAcknowledge(
+  counts: ClearCounts,
+  pending: boolean,
+  failed: boolean,
+  nothing: boolean,
+  mode: ClearDialogRequest['mode'],
+): string {
+  if (nothing || pending || failed) return 'I understand this action deletes session logs from disk.'
+  const removal = mode === 'workspace'
+    ? 'the workspace is removed from the sidebar'
+    : 'every workspace is removed from the sidebar'
+  return counts.targets === 1
+    ? `I understand this 1 session log is permanently deleted and ${removal}.`
+    : `I understand these ${counts.targets} session logs are permanently deleted and ${removal}.`
+}
+
+export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, onCleared }: ClearHistoryDialogProps): JSX.Element {
   const [request, setRequest] = useState<ClearDialogRequest | null>(null)
   const [preview, setPreview] = useState<RemoteCallOutcome<PreviewOutcome> | null>(null)
   const [busy, setBusy] = useState(false)
@@ -106,7 +126,10 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onCleared }: 
     const keptNote = counts.kept > 0
       ? ` Sessions that are currently open (and their running subagents) are kept: ${counts.kept}.`
       : ' Sessions that are currently open are kept.'
-    return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}.${keptNote}`
+    const removedNote = request.mode === 'workspace'
+      ? ` and removes the workspace from the sidebar`
+      : ' and removes every workspace from the sidebar'
+    return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}${removedNote}.${keptNote}`
   })()
 
   const confirmLabel = previewPending || previewFailed
@@ -134,12 +157,11 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onCleared }: 
       }
       if (counts.deleted < counts.targets) {
         setResult(`Deleted ${counts.deleted} of ${counts.targets} session logs. `
-          + 'The rest could not be resolved to safe on-disk directories.')
+          + 'The rest could not be resolved to safe on-disk directories, so the workspace was kept.')
         onCleared()
         return
       }
-      onCleared()
-      close()
+      onSuccess()
     })
   }
 
@@ -148,11 +170,7 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onCleared }: 
       open
       title={request.mode === 'workspace' ? 'Clear session history' : 'Clear all session history'}
       description={failure !== null ? `Delete failed: ${failure}` : result !== null ? result : description}
-      acknowledgeLabel={nothingToDelete || previewPending || previewFailed
-        ? 'I understand this action deletes session logs from disk.'
-        : counts.targets === 1
-          ? 'I understand this 1 session log will be permanently deleted from disk.'
-          : `I understand these ${counts.targets} session logs will be permanently deleted from disk.`}
+      acknowledgeLabel={resolveAcknowledge(counts, previewPending, previewFailed, nothingToDelete, request.mode)}
       cancelLabel="Cancel"
       confirmLabel={confirmLabel}
       acknowledged={acknowledged}
