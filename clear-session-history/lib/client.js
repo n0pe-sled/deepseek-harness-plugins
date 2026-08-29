@@ -205,7 +205,7 @@ window.__ModuleLoader__.load({
 				if (!(clone instanceof HTMLElement)) return;
 				const cloneButton = clone.querySelector("button[role=\"menuitem\"]");
 				if (cloneButton === null) return;
-				cloneButton.dataset.clearHistory = "true";
+				cloneButton.dataset.dshClearHistory = "true";
 				cloneButton.setAttribute("aria-label", MENU_ITEM_LABEL[locale]);
 				for (const span of cloneButton.querySelectorAll("span")) if ((span.textContent ?? "").trim() === deletedLabel) {
 					span.textContent = MENU_ITEM_LABEL[locale];
@@ -233,17 +233,17 @@ window.__ModuleLoader__.load({
 			style.textContent = ["[data-dsh-clear-all], [data-dsh-clear-all] span { color: var(--dsw-alias-state-error-primary) !important; }", "[data-dsh-clear-all]:hover, [data-dsh-clear-all]:hover span { color: var(--dsw-alias-state-error-secondary) !important; }"].join("\n");
 			document.head.appendChild(style);
 			const syncButton = () => {
-				const anchor = [...document.querySelectorAll("button[aria-label]")].filter((button) => NEW_SESSION_ARIA.has(button.getAttribute("aria-label") ?? ""))[0] ?? null;
-				const wide = anchor !== null && [...anchor.querySelectorAll("span")].some((span) => NEW_SESSION_TEXT.has((span.textContent ?? "").trim()));
+				const anchor = [...document.querySelectorAll("button[aria-label]")].filter((button) => NEW_SESSION_ARIA.has(button.getAttribute("aria-label") ?? "")).filter((button) => [...button.querySelectorAll("span")].some((span) => NEW_SESSION_TEXT.has((span.textContent ?? "").trim())))[0] ?? null;
 				const existing = document.querySelector("[data-dsh-clear-all]");
-				if (anchor === null || !wide) {
+				if (anchor === null) {
 					existing?.remove();
 					return;
 				}
+				for (const extra of document.querySelectorAll("[data-dsh-clear-all]")) if (extra !== existing) extra.remove();
 				if (existing !== null && anchor.nextElementSibling === existing) return;
 				const locale = [...anchor.querySelectorAll("span")].some((span) => (span.textContent ?? "").trim() === "新会话") ? "zh" : "en";
 				const button = existing ?? anchor.cloneNode(true);
-				button.dataset.clearAll = "true";
+				button.dataset.dshClearAll = "true";
 				button.removeAttribute("title");
 				button.setAttribute("aria-label", SIDEBAR_ARIA[locale]);
 				let labelled = false;

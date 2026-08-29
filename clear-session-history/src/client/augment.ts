@@ -131,7 +131,7 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
     if (!(clone instanceof HTMLElement)) return
     const cloneButton = clone.querySelector<HTMLButtonElement>('button[role="menuitem"]')
     if (cloneButton === null) return
-    cloneButton.dataset.clearHistory = 'true'
+    cloneButton.dataset.dshClearHistory = 'true'
     cloneButton.setAttribute('aria-label', MENU_ITEM_LABEL[locale])
     // Retarget the visible label span (the one that carried the Delete text);
     // the leading icon span (trash) is kept as-is.
@@ -176,17 +176,27 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
   document.head.appendChild(style)
 
   const syncButton = (): void => {
+    // Both the brand/logo row and the dedicated button share the
+    // `New session` aria-label, but only the dedicated button carries the
+    // "New Session" label text in the wide sidebar (the brand row shows the
+    // product name). Key on that label span so the clear-all button lands
+    // directly below the real New Session button, and so the icon-only rail
+    // (no label text) keeps it hidden.
     const anchors = [...document.querySelectorAll<HTMLButtonElement>('button[aria-label]')]
       .filter(button => NEW_SESSION_ARIA.has(button.getAttribute('aria-label') ?? ''))
+      .filter(button => [...button.querySelectorAll('span')]
+        .some(span => NEW_SESSION_TEXT.has((span.textContent ?? '').trim())))
     const anchor = anchors[0] ?? null
-    // Only the wide sidebar shows a label; the 56px rail stays icon-only.
-    const wide = anchor !== null && [...anchor.querySelectorAll('span')]
-      .some(span => NEW_SESSION_TEXT.has((span.textContent ?? '').trim()))
 
     const existing = document.querySelector<HTMLButtonElement>('[data-dsh-clear-all]')
-    if (anchor === null || !wide) {
+    if (anchor === null) {
       existing?.remove()
       return
+    }
+    // The insert below is idempotent, but sweep any strays first so a
+    // re-entrant path can never restack duplicates.
+    for (const extra of document.querySelectorAll<HTMLButtonElement>('[data-dsh-clear-all]')) {
+      if (extra !== existing) extra.remove()
     }
     if (existing !== null && anchor.nextElementSibling === existing) return
 
@@ -194,7 +204,7 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
       .some(span => (span.textContent ?? '').trim() === '新会话') ? 'zh' : 'en'
 
     const button = (existing ?? ((anchor.cloneNode(true)) as HTMLButtonElement))
-    button.dataset.clearAll = 'true'
+    button.dataset.dshClearAll = 'true'
     button.removeAttribute('title')
     button.setAttribute('aria-label', SIDEBAR_ARIA[locale])
     let labelled = false
