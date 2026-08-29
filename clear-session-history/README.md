@@ -24,6 +24,12 @@ so what disappears from disk is exactly what the sidebar lists. Effects:
   Harmless: the sidebar joins membership against `session.list` and skips ids
   without a summary.
 
+The plugin is home-agnostic by construction: it never resolves a path itself
+(no `~/.dsh` literal, no home lookup), and every path it touches comes from
+host services whose wiring is `$DSH_HOME`-derived (`dshHomePath('sessions')`).
+Verified against a harness booted with a custom `DSH_HOME`: previews read that
+home's sessions, a clear removed them, and the default home stayed untouched.
+
 ### What is deliberately kept
 
 - **Sessions that are currently open** in the running host: deleting an
