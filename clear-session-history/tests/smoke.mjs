@@ -119,7 +119,10 @@ plugin.apply(ctx)
 const receiver = provided.clearSessionHistory
 assert.ok(receiver, 'receiver must be provided under the service key')
 assert.equal(contributions.length, 1, 'exactly one typert contribution')
-assert.deepEqual(contributions[0].invocations.map(d => d.method).sort(), ['clear', 'preview'])
+assert.deepEqual(
+  contributions[0].invocations.map(d => d.method).sort(),
+  ['clear', 'clearSession', 'preview', 'previewSession'],
+)
 
 // ---- preview scoped to one workspace ---------------------------------------
 
@@ -227,6 +230,52 @@ if (hostile.ok) {
 }
 assert.equal(hostileRegistry.deleted.size, 0, 'no workspace registration touched on partial clear')
 
+// ---- single-session delete ------------------------------------------------
+
+const sessRoot = makeSessionsRoot()
+const sessRegistry = makeRegistry([...WORKSPACES])
+const { ctx: ctxS, provided: providedS } = makeCtx({
+  sessionPersistence: makePersistence(sessRoot),
+  sessions: SESSIONS,
+  workspaceRegistry: sessRegistry,
+})
+plugin.apply(ctxS)
+const sessionsReceiver = providedS.clearSessionHistory
+
+const noSuchPreview = await sessionsReceiver.previewSession({ sessionId: 'session-nope-9999' })
+assert.equal(noSuchPreview.ok, false)
+if (!noSuchPreview.ok) assert.match(noSuchPreview.error, /no session/)
+
+const noSuchClear = await sessionsReceiver.clearSession({ sessionId: 'session-nope-9999' })
+assert.equal(noSuchClear.ok, false)
+
+const coldPreview = await sessionsReceiver.previewSession({ sessionId: 'session-aaaa-1111' })
+assert.deepEqual(coldPreview, { ok: true, targets: 1, kept: 0 }, 'cold session is deletable')
+const coldClear = await sessionsReceiver.clearSession({ sessionId: 'session-aaaa-1111' })
+assert.equal(coldClear.ok, true)
+if (coldClear.ok) {
+  assert.equal(coldClear.deleted, 1)
+  assert.equal(coldClear.removed, 0, 'a single-session delete never removes a workspace')
+}
+assert.ok(!exists(sessRoot, '--Users-test-ws--', 'session-aaaa-1111'), 'cold session dir removed')
+assert.equal(sessRegistry.deleted.size, 0, 'no workspace registration touched by a session delete')
+
+const livePreview = await sessionsReceiver.previewSession({ sessionId: 'session-live-3333' })
+assert.deepEqual(livePreview, { ok: true, targets: 0, kept: 1 }, 'open session is not deletable')
+const liveClear = await sessionsReceiver.clearSession({ sessionId: 'session-live-3333' })
+assert.equal(liveClear.ok, false)
+if (!liveClear.ok) assert.match(liveClear.error, /open|needed/)
+assert.ok(exists(sessRoot, '--Users-test-ws--', 'session-live-3333'), 'live log untouched')
+
+const subClear = await sessionsReceiver.clearSession({ sessionId: 'session-sub-4444' })
+assert.equal(subClear.ok, false)
+assert.ok(exists(sessRoot, '--Users-test-ws--', 'session-sub-4444'), 'protected subagent log untouched')
+
+const orphanClear = await sessionsReceiver.clearSession({ sessionId: 'session-orphan-5555' })
+assert.equal(orphanClear.ok, true)
+if (orphanClear.ok) assert.equal(orphanClear.deleted, 1)
+assert.ok(!exists(sessRoot, '_no-cwd', 'session-orphan-5555'), 'no-cwd session dir removed')
+
 // ---- missing service fails soft ----------------------------------------------
 
 const { ctx: ctx4, provided: provided4 } = makeCtx({ sessions: SESSIONS })
@@ -238,5 +287,6 @@ if (!missing.ok) assert.match(missing.error, /sessionPersistence/)
 rmSync(root, { recursive: true, force: true })
 rmSync(secondRoot, { recursive: true, force: true })
 rmSync(hostileRoot, { recursive: true, force: true })
+rmSync(sessRoot, { recursive: true, force: true })
 
 console.log('smoke: all assertions passed')

@@ -1,8 +1,7 @@
 # dsh-clear-session-history
 
-Adds two destructive "clear session history" affordances to the dsh web GUI,
-each behind an are-you-sure dialog that shows exactly how many session logs
-will be deleted:
+Adds destructive "clear session history" affordances to the dsh web GUI, each
+behind an are-you-sure dialog that shows exactly what will be deleted:
 
 1. **Clear session history.** A red row inside a workspace's own "…" menu in
    the sidebar (next to Rename / Delete workspace). Deletes every session log
@@ -11,6 +10,11 @@ will be deleted:
 2. **Clear all session history.** A red button directly below the New Session
    button. Deletes every session log on disk across all workspaces, then
    removes every workspace from the sidebar (a full reset to the blank state).
+3. **Delete session.** A red row (trash icon) inside any session's own "…"
+   menu in the sidebar (next to Rename / Fork / Archive). Deletes that one
+   session's log from disk. The workspace and its other sessions are
+   untouched. A session that is currently open (or needed by an open session)
+   can't be deleted; the dialog says so and stays on disk.
 ## What "delete" means
 
 Session logs live under `$DSH_HOME/sessions/<project-key>/<session-id>/`. The
@@ -58,16 +62,25 @@ The dialog states the kept count before the user acknowledges.
 
 ## How it fits the GUI
 
-Neither target surface declares a plugin slot. The workspace row menu belongs
-to `ui-workspace`'s browser and the New Session button to the sidebar shell, so
-the browser half integrates at the DOM level:
+None of the three surfaces declares a plugin slot. The workspace and session
+row menus belong to `ui-workspace`'s browser and the New Session button to the
+sidebar shell, so the browser half integrates at the DOM level:
 
-- A body-level observer recognizes the workspace menu by its Rename +
-  Delete-workspace item pair when it portals open, and clones the danger row
-  into a "Clear session history" row (same classes, same trash icon, red).
-  The target workspace is captured from the anchor button's aria-label at
-  pointerdown/keydown, with an occurrence index among same-titled rows so
-  same-basename workspaces resolve deterministically.
+- A body-level observer recognizes a portal menu by its item set when it
+  opens: the Rename + Delete-workspace pair is a workspace menu (a "Clear
+  session history" danger row is cloned in), the Rename + Fork + Archive set
+  is a session menu (a red "Delete session" row with a trash icon is cloned
+  in). The cloned rows reuse the menu's own classes and the theme's danger
+  color.
+- The target is captured from the anchor button's aria-label at
+  pointerdown/keydown: a workspace row (title + occurrence among same-titled
+  rows, so same-basename workspaces resolve deterministically) or a session
+  row (title, enclosing workspace group, and the row's index within the
+  group). The session id never reaches the DOM, so the plugin resolves it
+  from the click by addressing `workspace.sessionIds` at the group-relative
+  row index, mirroring the sidebar's own render order (skip archived and
+  summary-less ids), and double-checks the session title before acting. An
+  ungrouped row matches by title among sessions no workspace owns.
 - The New Session button gets a cloned red sibling below it (wide sidebar
   only; the 56px rail is left alone).
 
@@ -76,17 +89,18 @@ restructured DOM) rather than breaking the sidebar. Both shipped locales
 (English and 简体中文) are matched.
 
 The dialog is the harness's own `RiskConfirmation` primitive (checkbox-gated),
-hosted on the plugin's private React root. Both calls round-trip through the
-Typert remote (`/api/clearSessionHistory/preview|clear`):
+hosted on the plugin's private React root. All calls round-trip through the
+Typert remote (`/api/clearSessionHistory/*`):
 
-- `preview(input)` → `{ targets, kept }` for the scope, nothing touched.
-  The dialog's counts and button label come from this.
-- `clear(input)` → deletes and returns `{ deleted, targets, kept }`.
+- `preview(input)` / `clear(input)` → workspace scope
+  `{ workspaceTitle, titleOccurrence }` (empty title = every workspace);
+  returns `{ targets, kept }` / `{ deleted, targets, kept, removed }`.
+- `previewSession(input)` / `clearSession(input)` → single session
+  `{ sessionId }`; preview reports whether the log is deletable, clear
+  returns `{ deleted, targets, kept, removed }` and never removes a workspace.
 
-Scope input is `{ workspaceTitle, titleOccurrence }`; an empty title means
-every workspace. Titles are resolved through `workspaceRegistry` (registry
-display order), so the DOM order the sidebar shows is the order the node half
-sees.
+Workspace titles are resolved through `workspaceRegistry` (registry display
+order), matching the order the sidebar renders them.
 
 ## Install
 
@@ -117,8 +131,9 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 - `pnpm test` (node half against stubbed services + temp sessions root):
   scope matching, live/subagent keep rules, occurrence resolution, unknown
   workspace soft failure, workspace-registration removal (per-workspace and
-  clear-all), partial-clear keeps the workspace, degenerate `locate()`
-  refusal, missing-service failure.
+  clear-all), partial-clear keeps the workspace, single-session delete
+  (cold deletes, open/protected refused, unknown id fails, workspace never
+  removed), degenerate `locate()` refusal, missing-service failure.
 - Live probe against a running instance (non-destructive):
 
   ```sh

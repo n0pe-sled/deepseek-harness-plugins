@@ -18,6 +18,10 @@ function parseClearScopeInput(value) {
 		titleOccurrence: value.titleOccurrence
 	};
 }
+function parseSessionScopeInput(value) {
+	if (!isRecord(value) || typeof value.sessionId !== "string" || value.sessionId.trim() === "") throw new TypeError("session scope input must be a plain object with a non-empty sessionId string");
+	return { sessionId: value.sessionId };
+}
 function parseClearCounts(value) {
 	if (!isRecord(value) || !isNatural(value.targets) || !isNatural(value.kept)) throw new TypeError("clear counts must be a plain object with natural targets and kept");
 	return {
@@ -61,10 +65,11 @@ function parseClearOutcome(value) {
 	};
 }
 const CLEAR_SCOPE_INPUT_SCHEMA = { parse: parseClearScopeInput };
+const SESSION_SCOPE_INPUT_SCHEMA = { parse: parseSessionScopeInput };
 const PREVIEW_OUTCOME_SCHEMA = { parse: parsePreviewOutcome };
 const CLEAR_OUTCOME_SCHEMA = { parse: parseClearOutcome };
 /** The one descriptor each method needs: generated-style identity + strict codecs. */
-function descriptor(method, result) {
+function descriptor(method, result, inputSchema = CLEAR_SCOPE_INPUT_SCHEMA) {
 	return {
 		id: `${PREFIX}${method}`,
 		service: SERVICE,
@@ -78,7 +83,7 @@ function descriptor(method, result) {
 			codec: {
 				mode: "strict",
 				typeSymbol: `dsh-clear-session-history#${method}Input`,
-				schema: CLEAR_SCOPE_INPUT_SCHEMA
+				schema: inputSchema
 			}
 		}],
 		result: {
@@ -88,18 +93,24 @@ function descriptor(method, result) {
 		}
 	};
 }
-const DESCRIPTORS = [descriptor("preview", PREVIEW_OUTCOME_SCHEMA), descriptor("clear", CLEAR_OUTCOME_SCHEMA)];
+const DESCRIPTORS = [
+	descriptor("preview", PREVIEW_OUTCOME_SCHEMA),
+	descriptor("clear", CLEAR_OUTCOME_SCHEMA),
+	descriptor("previewSession", PREVIEW_OUTCOME_SCHEMA, SESSION_SCOPE_INPUT_SCHEMA),
+	descriptor("clearSession", CLEAR_OUTCOME_SCHEMA, SESSION_SCOPE_INPUT_SCHEMA)
+];
 //#endregion
 //#region src/index.ts
 /**
 * Host (Node) half of the Clear Session History plugin.
 *
 * Deletes session logs from disk under the sessions root, scoped either to one
-* workspace (matched by display title, resolved through `workspaceRegistry`)
-* or to every workspace at once. The on-disk layout comes from the configured
-* session persistence backend: each materialized session owns one directory
-* (`<root>/<projectKey>/<sessionId>/`), which the backend's `locate()` resolves
-* without guessing at the project-slug algorithm.
+* workspace (matched by display title, resolved through `workspaceRegistry`),
+* to every workspace at once, or to a single session (matched by
+* `sessionId`, resolved client-side from the sidebar row). The on-disk layout
+* comes from the configured session persistence backend: each materialized
+* session owns one directory (`<root>/<projectKey>/<sessionId>/`), which the
+* backend's `locate()` resolves without guessing at the project-slug algorithm.
 *
 * Safety model — the persistence service is append-only and knows nothing
 * about this plugin, so the rules here err toward keeping data:
@@ -393,10 +404,84 @@ function apply(ctx) {
 			};
 		}
 	};
+	/** Locate one session by id and say why a delete would be refused. */
+	const inspectSession = async (persistence, sessions, sessionId) => {
+		const header = (await persistence.list()).find((candidate) => candidate.id === sessionId);
+		if (header === void 0) return { refusals: [`no session with id "${sessionId}" is stored on disk`] };
+		if ((await protectedIds(persistence, sessions)).has(header.id)) return {
+			header,
+			refusals: ["this session is currently open (or needed by an open session) and cannot be deleted"]
+		};
+		return {
+			header,
+			refusals: []
+		};
+	};
+	/** Counts only: whether a single session's log is deletable, nothing touched. */
+	const previewSession = async (input) => {
+		const services = resolveServices();
+		if ("error" in services) return {
+			ok: false,
+			error: services.error
+		};
+		const result = await inspectSession(services.persistence, services.sessions, input.sessionId);
+		if (result.header === void 0) return {
+			ok: false,
+			error: result.refusals[0] ?? "session not found"
+		};
+		return result.refusals.length > 0 ? {
+			ok: true,
+			targets: 0,
+			kept: 1
+		} : {
+			ok: true,
+			targets: 1,
+			kept: 0
+		};
+	};
+	/** Delete one session's log from disk; never touches the workspace registration. */
+	const clearSession = async (input) => {
+		const services = resolveServices();
+		if ("error" in services) return {
+			ok: false,
+			error: services.error
+		};
+		const result = await inspectSession(services.persistence, services.sessions, input.sessionId);
+		if (result.header === void 0) return {
+			ok: false,
+			error: result.refusals[0] ?? "session not found"
+		};
+		if (result.refusals.length > 0) return {
+			ok: false,
+			error: result.refusals[0] ?? "session not found"
+		};
+		try {
+			const deleted = await deleteSessionDir(result.header, services.persistence) ? 1 : 0;
+			if (deleted === 1) {
+				const location = services.persistence.locate(result.header);
+				if (location !== void 0) await pruneEmptyProjectDir(path.dirname(path.dirname(location.path)));
+				log.info("[clear-session-history] deleted session log %s", result.header.id);
+			}
+			return {
+				ok: true,
+				deleted,
+				targets: 1,
+				kept: 0,
+				removed: 0
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				error: error instanceof Error ? error.message : String(error)
+			};
+		}
+	};
 	const receiver = {
 		typertRemote: void 0,
 		preview,
-		clear
+		clear,
+		previewSession,
+		clearSession
 	};
 	receiver.typertRemote = bindTypertRemote(receiver, SERVICE, { namespace: SERVICE });
 	ctx.provide(SERVICE, receiver);

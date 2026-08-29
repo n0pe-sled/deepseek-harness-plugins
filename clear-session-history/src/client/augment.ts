@@ -25,30 +25,58 @@
 
 /** A dialog request the augmentation hands back to the plugin. */
 export interface ClearDialogRequest {
-  mode: 'workspace' | 'all'
+  mode: 'workspace' | 'all' | 'session'
   workspaceTitle: string
   titleOccurrence: number
+  /** session mode only: the resolved session id (node half deletes by it). */
+  sessionId?: string
+  /** session mode only: the session's display title, shown in the dialog. */
+  sessionTitle?: string
+}
+
+/** The DOM facts captured from a session row's menu anchor at arming time,
+ * before the portal menu opens. The plugin resolves these to a session id
+ * through the client stores. */
+export interface SessionTarget {
+  sessionTitle: string
+  /** The enclosing workspace group's title, or null for an ungrouped row. */
+  workspaceTitle: string | null
+  /** Index of the group among registry workspaces sharing its title. */
+  workspaceOccurrence: number
+  /** Index of the row within its group (== index in `workspace.sessionIds`). */
+  rowIndex: number
 }
 
 export interface SidebarIntegrationOptions {
   openDialog(request: ClearDialogRequest): void
+  /** Resolve a session target to an id and open the delete-session dialog. */
+  openSessionDialog(target: SessionTarget): void
 }
 
 /** Anchor arming window: the portal menu must appear within this long after
- * the pointerdown on a workspace row's menu anchor. */
+ * the pointerdown on a workspace/session row's menu anchor. */
 const MENU_ARM_MS = 5000
 
 const WORKSPACE_ARIA_EN_PREFIX = 'Workspace actions for '
 const WORKSPACE_ARIA_ZH = /^工作区“(.*)”的操作$/
+const SESSION_ARIA_EN_PREFIX = 'Session actions for '
+const SESSION_ARIA_ZH = /^会话“(.*)”的操作$/
 
 const RENAME_LABELS = new Set(['Rename', '重命名'])
 const DELETE_LABELS = new Set(['Delete workspace', '删除工作区'])
+/** A session row's menu is the one carrying a Fork/Archive row (the workspace
+ * menu's fork/archive are absent; its Delete-workspace pair is). */
+const SESSION_MENU_MARKERS = new Set(['Fork session', '分叉会话', 'Archive session', '归档会话'])
 const NEW_SESSION_ARIA = new Set(['New session', '新建会话'])
 const NEW_SESSION_TEXT = new Set(['New Session', '新会话'])
 
 const MENU_ITEM_LABEL: Record<'en' | 'zh', string> = {
   en: 'Clear session history',
   zh: '清空会话记录',
+}
+const SESSION_DELETE_LABEL: Record<'en' | 'zh', string> = {
+  en: 'Delete session',
+  zh: '删除会话',
 }
 const SIDEBAR_LABEL: Record<'en' | 'zh', string> = {
   en: 'Clear all session history',
@@ -70,11 +98,29 @@ function workspaceTitleOf(label: string): string | undefined {
   return title === undefined || title === '' ? undefined : title
 }
 
+/** Extract the session display title from a session row menu anchor. */
+function sessionTitleOf(label: string): string | undefined {
+  if (label.startsWith(SESSION_ARIA_EN_PREFIX)) {
+    const title = label.slice(SESSION_ARIA_EN_PREFIX.length)
+    return title === '' ? undefined : title
+  }
+  const zh = SESSION_ARIA_ZH.exec(label)
+  const title = zh?.[1]
+  return title === undefined || title === '' ? undefined : title
+}
+
 const itemText = (button: HTMLButtonElement): string => (button.textContent ?? '').trim()
 
+/** A minimal 16px trash glyph that inherits currentColor from the danger rules. */
+const TRASH_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/></svg>'
+
 export function installSidebarIntegration(options: SidebarIntegrationOptions): () => void {
-  /** The workspace row whose menu anchor was clicked most recently. */
-  let armed: { title: string; titleOccurrence: number; at: number } | null = null
+  type Armed =
+    | { kind: 'workspace'; title: string; titleOccurrence: number; at: number }
+    | { kind: 'session'; target: SessionTarget; at: number }
+  /** The row whose menu anchor was engaged most recently. */
+  let armed: Armed | null = null
 
   // ---- Anchor arming ------------------------------------------------------
 
@@ -82,19 +128,61 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
     const button = target.closest<HTMLButtonElement>('button[aria-label]')
     if (button === null) return
     const label = button.getAttribute('aria-label') ?? ''
-    const title = workspaceTitleOf(label)
-    if (title === undefined) return
-    // Occurrence index among same-titled anchors in DOM order — the sidebar
-    // renders workspace rows in registry display order.
-    const same = [...document.querySelectorAll<HTMLButtonElement>('button[aria-label]')]
-      .filter(candidate => workspaceTitleOf(candidate.getAttribute('aria-label') ?? '') === title)
-    const occurrence = Math.max(0, same.indexOf(button))
-    armed = { title, titleOccurrence: occurrence, at: Date.now() }
+    const workspaceTitle = workspaceTitleOf(label)
+    if (workspaceTitle !== undefined) {
+      // Occurrence index among same-titled anchors in DOM order — the sidebar
+      // renders workspace rows in registry display order.
+      const same = [...document.querySelectorAll<HTMLButtonElement>('button[aria-label]')]
+        .filter(candidate => workspaceTitleOf(candidate.getAttribute('aria-label') ?? '') === workspaceTitle)
+      const occurrence = Math.max(0, same.indexOf(button))
+      armed = { kind: 'workspace', title: workspaceTitle, titleOccurrence: occurrence, at: Date.now() }
+      return
+    }
+
+    const sessionTitle = sessionTitleOf(label)
+    if (sessionTitle === undefined) return
+    const row = button.closest<HTMLElement>('[role="treeitem"][aria-selected]')
+    if (row === null) return
+    // The enclosing workspace group is the closest ancestor that contains a
+    // workspace-menu anchor (the group's header row). None → ungrouped.
+    let group: HTMLElement | null = null
+    for (let parent: Element | null = row.parentElement; parent !== null && parent !== document.body; parent = parent.parentElement) {
+      const anchor = parent.querySelector<HTMLButtonElement>('button[aria-label]')
+      if (anchor !== null && workspaceTitleOf(anchor.getAttribute('aria-label') ?? '') !== undefined) {
+        group = parent as HTMLElement
+        break
+      }
+    }
+    const sessions = group === null
+      ? [row]
+      : [...group.querySelectorAll<HTMLElement>('[role="treeitem"][aria-selected]')]
+    const rowIndex = Math.max(0, sessions.indexOf(row))
+    let workspaceOccurrence = 0
+    let groupWorkspaceTitle: string | null = null
+    if (group !== null) {
+      const anchor = group.querySelector<HTMLButtonElement>('button[aria-label]')
+      const title = anchor === null ? undefined : workspaceTitleOf(anchor.getAttribute('aria-label') ?? '')
+      groupWorkspaceTitle = title ?? null
+      if (anchor !== null && title !== undefined) {
+        const same = [...document.querySelectorAll<HTMLButtonElement>('button[aria-label]')]
+          .filter(candidate => workspaceTitleOf(candidate.getAttribute('aria-label') ?? '') === title)
+        workspaceOccurrence = Math.max(0, same.indexOf(anchor))
+      }
+    }
+    armed = {
+      kind: 'session',
+      target: {
+        sessionTitle,
+        workspaceTitle: groupWorkspaceTitle,
+        workspaceOccurrence,
+        rowIndex,
+      },
+      at: Date.now(),
+    }
   }
 
-  // Capture-phase pointerdown arms the workspace identity before the menu
-  // opens; the keydown arm covers keyboard activation (Enter/Space fire no
-  // pointer events).
+  // Capture-phase pointerdown arms the row identity before the menu opens; the
+  // keydown arm covers keyboard activation (Enter/Space fire no pointer events).
   const onPointerDown = (event: PointerEvent): void => {
     if (event.target instanceof Element) armFromEvent(event.target)
   }
@@ -105,20 +193,79 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
   document.addEventListener('pointerdown', onPointerDown, true)
   document.addEventListener('keydown', onKeyDown, true)
 
-  // ---- Workspace menu augmentation ---------------------------------------
+  // ---- Menu augmentation --------------------------------------------------
 
   /** Close whatever Menu list the clone lives in (outside pointerdown → onClose). */
   const dismissMenu = (): void => {
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
   }
 
+  /** Add a "Delete session" row to a session row's menu. */
+  const augmentSessionMenu = (menu: HTMLElement, target: SessionTarget): void => {
+    if (menu.querySelector('[data-dsh-clear-session]') !== null) return
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')]
+    const marker = buttons.find(button => SESSION_MENU_MARKERS.has(itemText(button)))
+    const source = buttons[buttons.length - 1]
+    if (marker === undefined || source === undefined) return
+    const wrapper = source.parentElement
+    if (!(wrapper instanceof HTMLElement) || wrapper.parentElement === null) return
+
+    const locale: 'en' | 'zh' = itemText(marker) === 'Fork session' || itemText(marker) === 'Archive session' ? 'en' : 'zh'
+    const label = SESSION_DELETE_LABEL[locale]
+
+    const clone = wrapper.cloneNode(true)
+    if (!(clone instanceof HTMLElement)) return
+    const cloneButton = clone.querySelector<HTMLButtonElement>('button[role="menuitem"]')
+    if (cloneButton === null) return
+    cloneButton.dataset.dshClearSession = 'true'
+    cloneButton.setAttribute('aria-label', label)
+    // Label: replace the source row's text with the delete label (the source
+    // is the last session verb, e.g. Archive).
+    const sourceText = itemText(source)
+    for (const span of cloneButton.querySelectorAll('span')) {
+      if ((span.textContent ?? '').trim() === sourceText) {
+        span.textContent = label
+        break
+      }
+    }
+    // Icon: swap the leading icon slot for a trash glyph (colored by the
+    // danger rules via currentColor).
+    const currentIcon = cloneButton.querySelector('svg')
+    if (currentIcon !== null) {
+      const holder = document.createElement('div')
+      holder.innerHTML = TRASH_ICON_SVG
+      const trash = holder.firstElementChild
+      if (trash !== null) currentIcon.replaceWith(trash)
+    }
+    cloneButton.addEventListener('click', (event) => {
+      event.stopPropagation()
+      dismissMenu()
+      options.openSessionDialog(target)
+    })
+    wrapper.after(clone)
+  }
+
   const augmentMenu = (menu: HTMLElement): void => {
-    if (menu.querySelector('[data-dsh-clear-history]') !== null) return
     const buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')]
     const deleteRow = buttons.find(button => DELETE_LABELS.has(itemText(button)))
+    const isWorkspaceMenu = deleteRow !== undefined && buttons.some(button => RENAME_LABELS.has(itemText(button)))
+    const isSessionMenu = !isWorkspaceMenu && buttons.some(button => SESSION_MENU_MARKERS.has(itemText(button)))
+    if (isWorkspaceMenu) return augmentWorkspaceMenu(menu, deleteRow)
+    if (!isSessionMenu) return
+    if (armed === null || armed.kind !== 'session' || Date.now() - armed.at > MENU_ARM_MS) return
+    const { target } = armed
+    armed = null
+    augmentSessionMenu(menu, target)
+  }
+
+  /** Add a "Clear session history" row to a workspace row's menu. */
+  const augmentWorkspaceMenu = (
+    menu: HTMLElement,
+    deleteRow: HTMLButtonElement | undefined,
+  ): void => {
+    if (menu.querySelector('[data-dsh-clear-history]') !== null) return
     if (deleteRow === undefined) return
-    if (!buttons.some(button => RENAME_LABELS.has(itemText(button)))) return
-    if (armed === null || Date.now() - armed.at > MENU_ARM_MS) return
+    if (armed === null || armed.kind !== 'workspace' || Date.now() - armed.at > MENU_ARM_MS) return
     const { title, titleOccurrence } = armed
     armed = null
 
@@ -133,8 +280,6 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
     if (cloneButton === null) return
     cloneButton.dataset.dshClearHistory = 'true'
     cloneButton.setAttribute('aria-label', MENU_ITEM_LABEL[locale])
-    // Retarget the visible label span (the one that carried the Delete text);
-    // the leading icon span (trash) is kept as-is.
     for (const span of cloneButton.querySelectorAll('span')) {
       if ((span.textContent ?? '').trim() === deletedLabel) {
         span.textContent = MENU_ITEM_LABEL[locale]
@@ -172,6 +317,8 @@ export function installSidebarIntegration(options: SidebarIntegrationOptions): (
   style.textContent = [
     '[data-dsh-clear-all], [data-dsh-clear-all] span { color: var(--dsw-alias-state-error-primary) !important; }',
     '[data-dsh-clear-all]:hover, [data-dsh-clear-all]:hover span { color: var(--dsw-alias-state-error-secondary) !important; }',
+    '[data-dsh-clear-session], [data-dsh-clear-session] span, [data-dsh-clear-session] svg { color: var(--dsw-alias-state-error-primary) !important; }',
+    '[data-dsh-clear-session]:hover, [data-dsh-clear-session]:hover span, [data-dsh-clear-session]:hover svg { color: var(--dsw-alias-state-error-secondary) !important; background: var(--dsw-alias-interactive-bg-hover-danger); }',
   ].join('\n')
   document.head.appendChild(style)
 

@@ -11,13 +11,22 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RiskConfirmation } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ClearCounts, ClearOutcome, ClearScopeInput, PreviewOutcome, RemoteCallOutcome } from '../shared/remote.ts'
+import type {
+  ClearCounts, ClearOutcome, ClearScopeInput, PreviewOutcome, RemoteCallOutcome, SessionScopeInput,
+} from '../shared/remote.ts'
+
+/** A clear call's payload for this mode: workspace scope or a single session. */
+export type ClearCallInput = ClearScopeInput | SessionScopeInput
 
 /** What the augmentation asks the dialog to show. */
 export interface ClearDialogRequest {
-  mode: 'workspace' | 'all'
+  mode: 'workspace' | 'all' | 'session'
   workspaceTitle: string
   titleOccurrence: number
+  /** session mode only: the resolved session id (deleted by the host). */
+  sessionId?: string
+  /** session mode only: the session's display title. */
+  sessionTitle?: string
 }
 
 /** Imperative handle the plugin body holds. */
@@ -29,9 +38,9 @@ interface ClearHistoryDialogProps {
   /** Called once on mount with the imperative handle. */
   register(api: DialogApi): void
   /** Host-side count of what a clear would delete (nothing touched). */
-  onPreview(input: ClearScopeInput): Promise<RemoteCallOutcome<PreviewOutcome>>
+  onPreview(mode: ClearDialogRequest['mode'], input: ClearCallInput): Promise<RemoteCallOutcome<PreviewOutcome>>
   /** The destructive call itself. */
-  onClear(input: ClearScopeInput): Promise<RemoteCallOutcome<ClearOutcome>>
+  onClear(mode: ClearDialogRequest['mode'], input: ClearCallInput): Promise<RemoteCallOutcome<ClearOutcome>>
   /** Fired after a fully successful clear: the plugin reloads so the fresh
    * session and workspace lists reflect the deletion. */
   onSuccess(): void
@@ -42,6 +51,19 @@ interface ClearHistoryDialogProps {
 /** A preview that never arrived (host unavailable, request lost). */
 const EMPTY_COUNTS: ClearCounts = { targets: 0, kept: 0 }
 
+/** The wire payload for a request: a session id for single deletes, else the
+ * workspace scope (empty title = every workspace). */
+function buildInput(request: ClearDialogRequest): ClearCallInput | null {
+  if (request.mode === 'session') {
+    if (request.sessionId === undefined) return null
+    return { sessionId: request.sessionId }
+  }
+  return {
+    workspaceTitle: request.mode === 'workspace' ? request.workspaceTitle : '',
+    titleOccurrence: request.titleOccurrence,
+  }
+}
+
 /** The acknowledgement line, wording the workspace removal per mode. */
 function resolveAcknowledge(
   counts: ClearCounts,
@@ -51,6 +73,9 @@ function resolveAcknowledge(
   mode: ClearDialogRequest['mode'],
 ): string {
   if (nothing || pending || failed) return 'I understand this action deletes session logs from disk.'
+  if (mode === 'session') {
+    return 'I understand this session log will be permanently deleted from disk.'
+  }
   const removal = mode === 'workspace'
     ? 'the workspace is removed from the sidebar'
     : 'every workspace is removed from the sidebar'
@@ -88,12 +113,13 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
         setAcknowledged(false)
         setFailure(null)
         setResult(null)
-        const input: ClearScopeInput = {
-          workspaceTitle: next.mode === 'workspace' ? next.workspaceTitle : '',
-          titleOccurrence: next.titleOccurrence,
+        const input = buildInput(next)
+        if (input === null) {
+          setFailure('Could not identify this session in the sidebar.')
+          return
         }
         const ticket = generation.current
-        void onPreview(input).then(outcome => {
+        void onPreview(next.mode, input).then(outcome => {
           if (generation.current !== ticket) return
           setPreview(outcome)
         })
@@ -110,7 +136,10 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
   const counts: ClearCounts = preview !== null && preview.ok && preview.value.ok
     ? { targets: preview.value.targets, kept: preview.value.kept }
     : EMPTY_COUNTS
-  const scopeLabel = request.mode === 'workspace' ? `"${request.workspaceTitle}"` : 'every workspace'
+  const sessionName = request.sessionTitle ?? 'this session'
+  const scopeLabel = request.mode === 'workspace'
+    ? `"${request.workspaceTitle}"`
+    : request.mode === 'session' ? `"${sessionName}"` : 'every workspace'
   const previewPending = preview === null
   const previewError = preview === null
     ? null
@@ -119,9 +148,19 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
   const nothingToDelete = !previewPending && !previewFailed && counts.targets === 0
 
   const description = (() => {
-    if (previewFailed) return `Could not count the session logs on disk: ${previewError ?? 'unknown error'}`
-    if (previewPending) return 'Counting the session logs stored on disk…'
-    if (nothingToDelete) return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`
+    if (previewFailed) return `Could not check the session logs on disk: ${previewError ?? 'unknown error'}`
+    if (previewPending) return request.mode === 'session' ? 'Checking this session…' : 'Counting the session logs stored on disk…'
+    if (nothingToDelete) {
+      if (request.mode === 'session') {
+        return counts.kept > 0
+          ? `This session is currently open (or needed by an open session) and can't be deleted. It stays on disk.`
+          : `No session log was found on disk for "${sessionName}". There is nothing to delete.`
+      }
+      return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`
+    }
+    if (request.mode === 'session') {
+      return `This permanently deletes the session log for "${sessionName}" from disk. The workspace and its other sessions are untouched.`
+    }
     const noun = counts.targets === 1 ? 'session log' : 'session logs'
     const keptNote = counts.kept > 0
       ? ` Sessions that are currently open (and their running subagents) are kept: ${counts.kept}.`
@@ -134,17 +173,20 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
 
   const confirmLabel = previewPending || previewFailed
     ? 'Delete'
-    : counts.targets === 1 ? 'Delete 1 session log' : `Delete ${counts.targets} session logs`
+    : request.mode === 'session'
+      ? 'Delete session'
+      : counts.targets === 1 ? 'Delete 1 session log' : `Delete ${counts.targets} session logs`
 
   const confirm = (): void => {
     if (busy || request === null) return
+    const input = buildInput(request)
+    if (input === null) {
+      setFailure('Could not identify this session in the sidebar.')
+      return
+    }
     setBusy(true)
     setFailure(null)
-    const input: ClearScopeInput = {
-      workspaceTitle: request.mode === 'workspace' ? request.workspaceTitle : '',
-      titleOccurrence: request.titleOccurrence,
-    }
-    void onClear(input).then(outcome => {
+    void onClear(request.mode, input).then(outcome => {
       setBusy(false)
       if (!outcome.ok) {
         setFailure(outcome.error)
@@ -168,7 +210,7 @@ export function ClearHistoryDialog({ register, onPreview, onClear, onSuccess, on
   return (
     <RiskConfirmation
       open
-      title={request.mode === 'workspace' ? 'Clear session history' : 'Clear all session history'}
+      title={request.mode === 'session' ? 'Delete session' : request.mode === 'workspace' ? 'Clear session history' : 'Clear all session history'}
       description={failure !== null ? `Delete failed: ${failure}` : result !== null ? result : description}
       acknowledgeLabel={resolveAcknowledge(counts, previewPending, previewFailed, nothingToDelete, request.mode)}
       cancelLabel="Cancel"

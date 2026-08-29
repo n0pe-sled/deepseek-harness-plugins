@@ -9,15 +9,18 @@
  * The client's Remote `$mount` requires strict codecs, so every descriptor
  * uses `{ mode: 'strict', schema }` with these validators.
  *
- * One service, `clearSessionHistory`, exposes two methods:
- *   - preview(input) → how many session logs a clear would delete / keep
- *   - clear(input)   → delete those session logs from disk (except kept ones)
+ * One service, `clearSessionHistory`, exposes four methods:
+ *   - preview(input)       → how many session logs a workspace/all clear would delete / keep
+ *   - clear(input)         → delete those session logs from disk (except kept ones)
+ *   - previewSession(input) → whether a single session's log is deletable
+ *   - clearSession(input)  → delete one session's log from disk
  *
  * `input.workspaceTitle === ''` means every workspace; a non-empty title
  * targets the `titleOccurrence`-th workspace with that display title (titles
  * are unique per registry rename rules, but `create` allows basenames to
  * collide, so the occurrence index disambiguates in registry display order —
- * the same order the sidebar renders).
+ * the same order the sidebar renders). The session methods target a single
+ * session by id.
  *
  * @module dsh-clear-session-history/remote
  */
@@ -28,12 +31,18 @@ import type {
   TypertSchema,
 } from '@deepseek-ai/dsh-typert-protocol'
 
-/** Which session logs one call addresses. */
+/** Which session logs one workspace/all call addresses. */
 export interface ClearScopeInput {
   /** Workspace display title, or `''` for every workspace. */
   readonly workspaceTitle: string
   /** 0-based index among the registry workspaces sharing that title. */
   readonly titleOccurrence: number
+}
+
+/** Which session a single-session delete addresses. */
+export interface SessionScopeInput {
+  /** The session id (the sidebar resolves it from the row being acted on). */
+  readonly sessionId: string
 }
 
 /** Session-log counts shared by preview and clear outcomes. */
@@ -85,6 +94,13 @@ function parseClearScopeInput(value: unknown): ClearScopeInput {
   return { workspaceTitle: value.workspaceTitle, titleOccurrence: value.titleOccurrence }
 }
 
+function parseSessionScopeInput(value: unknown): SessionScopeInput {
+  if (!isRecord(value) || typeof value.sessionId !== 'string' || value.sessionId.trim() === '') {
+    throw new TypeError('session scope input must be a plain object with a non-empty sessionId string')
+  }
+  return { sessionId: value.sessionId }
+}
+
 function parseClearCounts(value: unknown): ClearCounts {
   if (!isRecord(value) || !isNatural(value.targets) || !isNatural(value.kept)) {
     throw new TypeError('clear counts must be a plain object with natural targets and kept')
@@ -124,6 +140,7 @@ function parseClearOutcome(value: unknown): ClearOutcome {
 type TypertSchemaBoundary<T> = TypertSchema<T>
 
 const CLEAR_SCOPE_INPUT_SCHEMA: TypertSchemaBoundary<ClearScopeInput> = { parse: parseClearScopeInput }
+const SESSION_SCOPE_INPUT_SCHEMA: TypertSchemaBoundary<SessionScopeInput> = { parse: parseSessionScopeInput }
 const PREVIEW_OUTCOME_SCHEMA: TypertSchemaBoundary<PreviewOutcome> = { parse: parsePreviewOutcome }
 const CLEAR_OUTCOME_SCHEMA: TypertSchemaBoundary<ClearOutcome> = { parse: parseClearOutcome }
 
@@ -131,6 +148,7 @@ const CLEAR_OUTCOME_SCHEMA: TypertSchemaBoundary<ClearOutcome> = { parse: parseC
 function descriptor<R>(
   method: string,
   result: TypertSchemaBoundary<R>,
+  inputSchema: TypertSchemaBoundary<ClearScopeInput | SessionScopeInput> = CLEAR_SCOPE_INPUT_SCHEMA,
 ): InvocationDescriptor {
   return {
     id: `${PREFIX}${method}`,
@@ -145,7 +163,7 @@ function descriptor<R>(
       codec: {
         mode: 'strict',
         typeSymbol: `dsh-clear-session-history#${method}Input`,
-        schema: CLEAR_SCOPE_INPUT_SCHEMA,
+        schema: inputSchema,
       },
     }],
     result: { mode: 'strict', typeSymbol: `dsh-clear-session-history#${method}`, schema: result },
@@ -155,17 +173,23 @@ function descriptor<R>(
 export const DESCRIPTORS: readonly InvocationDescriptor[] = [
   descriptor('preview', PREVIEW_OUTCOME_SCHEMA),
   descriptor('clear', CLEAR_OUTCOME_SCHEMA),
+  descriptor('previewSession', PREVIEW_OUTCOME_SCHEMA, SESSION_SCOPE_INPUT_SCHEMA),
+  descriptor('clearSession', CLEAR_OUTCOME_SCHEMA, SESSION_SCOPE_INPUT_SCHEMA),
 ]
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'clearSessionHistory/preview'(input: ClearScopeInput): Promise<RemoteResult<PreviewOutcome>>
     'clearSessionHistory/clear'(input: ClearScopeInput): Promise<RemoteResult<ClearOutcome>>
+    'clearSessionHistory/previewSession'(input: SessionScopeInput): Promise<RemoteResult<PreviewOutcome>>
+    'clearSessionHistory/clearSession'(input: SessionScopeInput): Promise<RemoteResult<ClearOutcome>>
   }
   interface TypertRemoteNamespaceMap {
     clearSessionHistory: {
       preview(input: ClearScopeInput): Promise<RemoteResult<PreviewOutcome>>
       clear(input: ClearScopeInput): Promise<RemoteResult<ClearOutcome>>
+      previewSession(input: SessionScopeInput): Promise<RemoteResult<PreviewOutcome>>
+      clearSession(input: SessionScopeInput): Promise<RemoteResult<ClearOutcome>>
     }
   }
 }

@@ -2,11 +2,12 @@
  * Host (Node) half of the Clear Session History plugin.
  *
  * Deletes session logs from disk under the sessions root, scoped either to one
- * workspace (matched by display title, resolved through `workspaceRegistry`)
- * or to every workspace at once. The on-disk layout comes from the configured
- * session persistence backend: each materialized session owns one directory
- * (`<root>/<projectKey>/<sessionId>/`), which the backend's `locate()` resolves
- * without guessing at the project-slug algorithm.
+ * workspace (matched by display title, resolved through `workspaceRegistry`),
+ * to every workspace at once, or to a single session (matched by
+ * `sessionId`, resolved client-side from the sidebar row). The on-disk layout
+ * comes from the configured session persistence backend: each materialized
+ * session owns one directory (`<root>/<projectKey>/<sessionId>/`), which the
+ * backend's `locate()` resolves without guessing at the project-slug algorithm.
  *
  * Safety model — the persistence service is append-only and knows nothing
  * about this plugin, so the rules here err toward keeping data:
@@ -48,7 +49,7 @@ import type {} from '@deepseek-ai/dsh-typert-registry'
 import type { TypertContribution, TypertPackageModel } from '@deepseek-ai/dsh-typert-registry'
 import { bindTypertRemote, type TypertGatewayBinding } from '@deepseek-ai/dsh-typert-protocol'
 import { DESCRIPTORS, SERVICE } from './shared/remote.ts'
-import type { ClearOutcome, ClearScopeInput, PreviewOutcome } from './shared/remote.ts'
+import type { ClearOutcome, ClearScopeInput, PreviewOutcome, SessionScopeInput } from './shared/remote.ts'
 
 export const name = 'clear-session-history'
 
@@ -121,6 +122,8 @@ interface ClearSessionHistoryReceiver {
   typertRemote: TypertGatewayBinding<ClearSessionHistoryReceiver>
   preview(input: ClearScopeInput): Promise<PreviewOutcome>
   clear(input: ClearScopeInput): Promise<ClearOutcome>
+  previewSession(input: SessionScopeInput): Promise<PreviewOutcome>
+  clearSession(input: SessionScopeInput): Promise<ClearOutcome>
 }
 
 /** Empty model for the Typert contribution: no generated reflection is claimed. */
@@ -373,10 +376,65 @@ export function apply(ctx: Context): void {
     }
   }
 
+  /** Locate one session by id and say why a delete would be refused. */
+  const inspectSession = async (
+    persistence: PersistenceLike,
+    sessions: SessionsLike,
+    sessionId: string,
+  ): Promise<{ header?: SessionHeaderLike; refusals: string[] }> => {
+    const headers = await persistence.list()
+    const header = headers.find(candidate => candidate.id === sessionId)
+    if (header === undefined) return { refusals: [`no session with id "${sessionId}" is stored on disk`] }
+    const protectedSet = await protectedIds(persistence, sessions)
+    if (protectedSet.has(header.id)) {
+      return {
+        header,
+        refusals: ['this session is currently open (or needed by an open session) and cannot be deleted'],
+      }
+    }
+    return { header, refusals: [] }
+  }
+
+  /** Counts only: whether a single session's log is deletable, nothing touched. */
+  const previewSession = async (input: SessionScopeInput): Promise<PreviewOutcome> => {
+    const services = resolveServices()
+    if ('error' in services) return { ok: false, error: services.error }
+    const result = await inspectSession(services.persistence, services.sessions, input.sessionId)
+    if (result.header === undefined) return { ok: false, error: result.refusals[0] ?? 'session not found' }
+    return result.refusals.length > 0
+      ? { ok: true, targets: 0, kept: 1 }
+      : { ok: true, targets: 1, kept: 0 }
+  }
+
+  /** Delete one session's log from disk; never touches the workspace registration. */
+  const clearSession = async (input: SessionScopeInput): Promise<ClearOutcome> => {
+    const services = resolveServices()
+    if ('error' in services) return { ok: false, error: services.error }
+    const result = await inspectSession(services.persistence, services.sessions, input.sessionId)
+    if (result.header === undefined) return { ok: false, error: result.refusals[0] ?? 'session not found' }
+    if (result.refusals.length > 0) return { ok: false, error: result.refusals[0] ?? 'session not found' }
+    try {
+      const deleted = await deleteSessionDir(result.header, services.persistence) ? 1 : 0
+      if (deleted === 1) {
+        // Tidy: prune the project dir if this was its last session.
+        const location = services.persistence.locate(result.header)
+        if (location !== undefined) await pruneEmptyProjectDir(path.dirname(path.dirname(location.path)))
+        log.info(
+          '[clear-session-history] deleted session log %s', result.header.id,
+        )
+      }
+      return { ok: true, deleted, targets: 1, kept: 0, removed: 0 }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   const receiver: ClearSessionHistoryReceiver = {
     typertRemote: undefined as unknown as TypertGatewayBinding<ClearSessionHistoryReceiver>,
     preview,
     clear,
+    previewSession,
+    clearSession,
   }
   receiver.typertRemote = bindTypertRemote(receiver, SERVICE, { namespace: SERVICE })
   // A plain provided object resolves through the gateway's receiver lookup

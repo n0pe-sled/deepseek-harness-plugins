@@ -24,9 +24,22 @@ window.__ModuleLoader__.load({
 			targets: 0,
 			kept: 0
 		};
+		/** The wire payload for a request: a session id for single deletes, else the
+		* workspace scope (empty title = every workspace). */
+		function buildInput(request) {
+			if (request.mode === "session") {
+				if (request.sessionId === void 0) return null;
+				return { sessionId: request.sessionId };
+			}
+			return {
+				workspaceTitle: request.mode === "workspace" ? request.workspaceTitle : "",
+				titleOccurrence: request.titleOccurrence
+			};
+		}
 		/** The acknowledgement line, wording the workspace removal per mode. */
 		function resolveAcknowledge(counts, pending, failed, nothing, mode) {
 			if (nothing || pending || failed) return "I understand this action deletes session logs from disk.";
+			if (mode === "session") return "I understand this session log will be permanently deleted from disk.";
 			const removal = mode === "workspace" ? "the workspace is removed from the sidebar" : "every workspace is removed from the sidebar";
 			return counts.targets === 1 ? `I understand this 1 session log is permanently deleted and ${removal}.` : `I understand these ${counts.targets} session logs are permanently deleted and ${removal}.`;
 		}
@@ -56,12 +69,13 @@ window.__ModuleLoader__.load({
 					setAcknowledged(false);
 					setFailure(null);
 					setResult(null);
-					const input = {
-						workspaceTitle: next.mode === "workspace" ? next.workspaceTitle : "",
-						titleOccurrence: next.titleOccurrence
-					};
+					const input = buildInput(next);
+					if (input === null) {
+						setFailure("Could not identify this session in the sidebar.");
+						return;
+					}
 					const ticket = generation.current;
-					onPreview(input).then((outcome) => {
+					onPreview(next.mode, input).then((outcome) => {
 						if (generation.current !== ticket) return;
 						setPreview(outcome);
 					});
@@ -72,29 +86,36 @@ window.__ModuleLoader__.load({
 				targets: preview.value.targets,
 				kept: preview.value.kept
 			} : EMPTY_COUNTS;
-			const scopeLabel = request.mode === "workspace" ? `"${request.workspaceTitle}"` : "every workspace";
+			const sessionName = request.sessionTitle ?? "this session";
+			const scopeLabel = request.mode === "workspace" ? `"${request.workspaceTitle}"` : request.mode === "session" ? `"${sessionName}"` : "every workspace";
 			const previewPending = preview === null;
 			const previewError = preview === null ? null : !preview.ok ? preview.error : !preview.value.ok ? preview.value.error : null;
 			const previewFailed = previewError !== null;
 			const nothingToDelete = !previewPending && !previewFailed && counts.targets === 0;
 			const description = (() => {
-				if (previewFailed) return `Could not count the session logs on disk: ${previewError ?? "unknown error"}`;
-				if (previewPending) return "Counting the session logs stored on disk…";
-				if (nothingToDelete) return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`;
+				if (previewFailed) return `Could not check the session logs on disk: ${previewError ?? "unknown error"}`;
+				if (previewPending) return request.mode === "session" ? "Checking this session…" : "Counting the session logs stored on disk…";
+				if (nothingToDelete) {
+					if (request.mode === "session") return counts.kept > 0 ? `This session is currently open (or needed by an open session) and can't be deleted. It stays on disk.` : `No session log was found on disk for "${sessionName}". There is nothing to delete.`;
+					return `No session logs were found on disk for ${scopeLabel}. There is nothing to delete.`;
+				}
+				if (request.mode === "session") return `This permanently deletes the session log for "${sessionName}" from disk. The workspace and its other sessions are untouched.`;
 				const noun = counts.targets === 1 ? "session log" : "session logs";
 				const keptNote = counts.kept > 0 ? ` Sessions that are currently open (and their running subagents) are kept: ${counts.kept}.` : " Sessions that are currently open are kept.";
 				const removedNote = request.mode === "workspace" ? ` and removes the workspace from the sidebar` : " and removes every workspace from the sidebar";
 				return `This permanently deletes ${counts.targets} ${noun} from disk for ${scopeLabel}${removedNote}.${keptNote}`;
 			})();
-			const confirmLabel = previewPending || previewFailed ? "Delete" : counts.targets === 1 ? "Delete 1 session log" : `Delete ${counts.targets} session logs`;
+			const confirmLabel = previewPending || previewFailed ? "Delete" : request.mode === "session" ? "Delete session" : counts.targets === 1 ? "Delete 1 session log" : `Delete ${counts.targets} session logs`;
 			const confirm = () => {
 				if (busy || request === null) return;
+				const input = buildInput(request);
+				if (input === null) {
+					setFailure("Could not identify this session in the sidebar.");
+					return;
+				}
 				setBusy(true);
 				setFailure(null);
-				onClear({
-					workspaceTitle: request.mode === "workspace" ? request.workspaceTitle : "",
-					titleOccurrence: request.titleOccurrence
-				}).then((outcome) => {
+				onClear(request.mode, input).then((outcome) => {
 					setBusy(false);
 					if (!outcome.ok) {
 						setFailure(outcome.error);
@@ -115,7 +136,7 @@ window.__ModuleLoader__.load({
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.RiskConfirmation, {
 				open: true,
-				title: request.mode === "workspace" ? "Clear session history" : "Clear all session history",
+				title: request.mode === "session" ? "Delete session" : request.mode === "workspace" ? "Clear session history" : "Clear all session history",
 				description: failure !== null ? `Delete failed: ${failure}` : result !== null ? result : description,
 				acknowledgeLabel: resolveAcknowledge(counts, previewPending, previewFailed, nothingToDelete, request.mode),
 				cancelLabel: "Cancel",
@@ -130,17 +151,31 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/augment.ts
 		/** Anchor arming window: the portal menu must appear within this long after
-		* the pointerdown on a workspace row's menu anchor. */
+		* the pointerdown on a workspace/session row's menu anchor. */
 		const MENU_ARM_MS = 5e3;
 		const WORKSPACE_ARIA_EN_PREFIX = "Workspace actions for ";
 		const WORKSPACE_ARIA_ZH = /^工作区“(.*)”的操作$/;
+		const SESSION_ARIA_EN_PREFIX = "Session actions for ";
+		const SESSION_ARIA_ZH = /^会话“(.*)”的操作$/;
 		const RENAME_LABELS = /* @__PURE__ */ new Set(["Rename", "重命名"]);
 		const DELETE_LABELS = /* @__PURE__ */ new Set(["Delete workspace", "删除工作区"]);
+		/** A session row's menu is the one carrying a Fork/Archive row (the workspace
+		* menu's fork/archive are absent; its Delete-workspace pair is). */
+		const SESSION_MENU_MARKERS = /* @__PURE__ */ new Set([
+			"Fork session",
+			"分叉会话",
+			"Archive session",
+			"归档会话"
+		]);
 		const NEW_SESSION_ARIA = /* @__PURE__ */ new Set(["New session", "新建会话"]);
 		const NEW_SESSION_TEXT = /* @__PURE__ */ new Set(["New Session", "新会话"]);
 		const MENU_ITEM_LABEL = {
 			en: "Clear session history",
 			zh: "清空会话记录"
+		};
+		const SESSION_DELETE_LABEL = {
+			en: "Delete session",
+			zh: "删除会话"
 		};
 		const SIDEBAR_LABEL = {
 			en: "Clear all session history",
@@ -159,19 +194,69 @@ window.__ModuleLoader__.load({
 			const title = WORKSPACE_ARIA_ZH.exec(label)?.[1];
 			return title === void 0 || title === "" ? void 0 : title;
 		}
+		/** Extract the session display title from a session row menu anchor. */
+		function sessionTitleOf(label) {
+			if (label.startsWith(SESSION_ARIA_EN_PREFIX)) {
+				const title = label.slice(20);
+				return title === "" ? void 0 : title;
+			}
+			const title = SESSION_ARIA_ZH.exec(label)?.[1];
+			return title === void 0 || title === "" ? void 0 : title;
+		}
 		const itemText = (button) => (button.textContent ?? "").trim();
+		/** A minimal 16px trash glyph that inherits currentColor from the danger rules. */
+		const TRASH_ICON_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\" width=\"16\" height=\"16\" aria-hidden=\"true\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0\"/></svg>";
 		function installSidebarIntegration(options) {
-			/** The workspace row whose menu anchor was clicked most recently. */
+			/** The row whose menu anchor was engaged most recently. */
 			let armed = null;
 			const armFromEvent = (target) => {
 				const button = target.closest("button[aria-label]");
 				if (button === null) return;
-				const title = workspaceTitleOf(button.getAttribute("aria-label") ?? "");
-				if (title === void 0) return;
-				const same = [...document.querySelectorAll("button[aria-label]")].filter((candidate) => workspaceTitleOf(candidate.getAttribute("aria-label") ?? "") === title);
+				const label = button.getAttribute("aria-label") ?? "";
+				const workspaceTitle = workspaceTitleOf(label);
+				if (workspaceTitle !== void 0) {
+					const same = [...document.querySelectorAll("button[aria-label]")].filter((candidate) => workspaceTitleOf(candidate.getAttribute("aria-label") ?? "") === workspaceTitle);
+					armed = {
+						kind: "workspace",
+						title: workspaceTitle,
+						titleOccurrence: Math.max(0, same.indexOf(button)),
+						at: Date.now()
+					};
+					return;
+				}
+				const sessionTitle = sessionTitleOf(label);
+				if (sessionTitle === void 0) return;
+				const row = button.closest("[role=\"treeitem\"][aria-selected]");
+				if (row === null) return;
+				let group = null;
+				for (let parent = row.parentElement; parent !== null && parent !== document.body; parent = parent.parentElement) {
+					const anchor = parent.querySelector("button[aria-label]");
+					if (anchor !== null && workspaceTitleOf(anchor.getAttribute("aria-label") ?? "") !== void 0) {
+						group = parent;
+						break;
+					}
+				}
+				const sessions = group === null ? [row] : [...group.querySelectorAll("[role=\"treeitem\"][aria-selected]")];
+				const rowIndex = Math.max(0, sessions.indexOf(row));
+				let workspaceOccurrence = 0;
+				let groupWorkspaceTitle = null;
+				if (group !== null) {
+					const anchor = group.querySelector("button[aria-label]");
+					const title = anchor === null ? void 0 : workspaceTitleOf(anchor.getAttribute("aria-label") ?? "");
+					groupWorkspaceTitle = title ?? null;
+					if (anchor !== null && title !== void 0) {
+						const same = [...document.querySelectorAll("button[aria-label]")].filter((candidate) => workspaceTitleOf(candidate.getAttribute("aria-label") ?? "") === title);
+						workspaceOccurrence = Math.max(0, same.indexOf(anchor));
+					}
+				}
 				armed = {
-					title,
-					titleOccurrence: Math.max(0, same.indexOf(button)),
+					kind: "session",
+					target: {
+						sessionTitle,
+						workspaceTitle: groupWorkspaceTitle,
+						workspaceOccurrence,
+						rowIndex
+					},
 					at: Date.now()
 				};
 			};
@@ -188,13 +273,59 @@ window.__ModuleLoader__.load({
 			const dismissMenu = () => {
 				document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
 			};
+			/** Add a "Delete session" row to a session row's menu. */
+			const augmentSessionMenu = (menu, target) => {
+				if (menu.querySelector("[data-dsh-clear-session]") !== null) return;
+				const buttons = [...menu.querySelectorAll("button[role=\"menuitem\"]")];
+				const marker = buttons.find((button) => SESSION_MENU_MARKERS.has(itemText(button)));
+				const source = buttons[buttons.length - 1];
+				if (marker === void 0 || source === void 0) return;
+				const wrapper = source.parentElement;
+				if (!(wrapper instanceof HTMLElement) || wrapper.parentElement === null) return;
+				const locale = itemText(marker) === "Fork session" || itemText(marker) === "Archive session" ? "en" : "zh";
+				const label = SESSION_DELETE_LABEL[locale];
+				const clone = wrapper.cloneNode(true);
+				if (!(clone instanceof HTMLElement)) return;
+				const cloneButton = clone.querySelector("button[role=\"menuitem\"]");
+				if (cloneButton === null) return;
+				cloneButton.dataset.dshClearSession = "true";
+				cloneButton.setAttribute("aria-label", label);
+				const sourceText = itemText(source);
+				for (const span of cloneButton.querySelectorAll("span")) if ((span.textContent ?? "").trim() === sourceText) {
+					span.textContent = label;
+					break;
+				}
+				const currentIcon = cloneButton.querySelector("svg");
+				if (currentIcon !== null) {
+					const holder = document.createElement("div");
+					holder.innerHTML = TRASH_ICON_SVG;
+					const trash = holder.firstElementChild;
+					if (trash !== null) currentIcon.replaceWith(trash);
+				}
+				cloneButton.addEventListener("click", (event) => {
+					event.stopPropagation();
+					dismissMenu();
+					options.openSessionDialog(target);
+				});
+				wrapper.after(clone);
+			};
 			const augmentMenu = (menu) => {
-				if (menu.querySelector("[data-dsh-clear-history]") !== null) return;
 				const buttons = [...menu.querySelectorAll("button[role=\"menuitem\"]")];
 				const deleteRow = buttons.find((button) => DELETE_LABELS.has(itemText(button)));
+				const isWorkspaceMenu = deleteRow !== void 0 && buttons.some((button) => RENAME_LABELS.has(itemText(button)));
+				const isSessionMenu = !isWorkspaceMenu && buttons.some((button) => SESSION_MENU_MARKERS.has(itemText(button)));
+				if (isWorkspaceMenu) return augmentWorkspaceMenu(menu, deleteRow);
+				if (!isSessionMenu) return;
+				if (armed === null || armed.kind !== "session" || Date.now() - armed.at > MENU_ARM_MS) return;
+				const { target } = armed;
+				armed = null;
+				augmentSessionMenu(menu, target);
+			};
+			/** Add a "Clear session history" row to a workspace row's menu. */
+			const augmentWorkspaceMenu = (menu, deleteRow) => {
+				if (menu.querySelector("[data-dsh-clear-history]") !== null) return;
 				if (deleteRow === void 0) return;
-				if (!buttons.some((button) => RENAME_LABELS.has(itemText(button)))) return;
-				if (armed === null || Date.now() - armed.at > MENU_ARM_MS) return;
+				if (armed === null || armed.kind !== "workspace" || Date.now() - armed.at > MENU_ARM_MS) return;
 				const { title, titleOccurrence } = armed;
 				armed = null;
 				const wrapper = deleteRow.parentElement;
@@ -230,7 +361,12 @@ window.__ModuleLoader__.load({
 			menuObserver.observe(document.body, { childList: true });
 			const style = document.createElement("style");
 			style.dataset.dshClearAllStyle = "true";
-			style.textContent = ["[data-dsh-clear-all], [data-dsh-clear-all] span { color: var(--dsw-alias-state-error-primary) !important; }", "[data-dsh-clear-all]:hover, [data-dsh-clear-all]:hover span { color: var(--dsw-alias-state-error-secondary) !important; }"].join("\n");
+			style.textContent = [
+				"[data-dsh-clear-all], [data-dsh-clear-all] span { color: var(--dsw-alias-state-error-primary) !important; }",
+				"[data-dsh-clear-all]:hover, [data-dsh-clear-all]:hover span { color: var(--dsw-alias-state-error-secondary) !important; }",
+				"[data-dsh-clear-session], [data-dsh-clear-session] span, [data-dsh-clear-session] svg { color: var(--dsw-alias-state-error-primary) !important; }",
+				"[data-dsh-clear-session]:hover, [data-dsh-clear-session]:hover span, [data-dsh-clear-session]:hover svg { color: var(--dsw-alias-state-error-secondary) !important; background: var(--dsw-alias-interactive-bg-hover-danger); }"
+			].join("\n");
 			document.head.appendChild(style);
 			const syncButton = () => {
 				const anchor = [...document.querySelectorAll("button[aria-label]")].filter((button) => NEW_SESSION_ARIA.has(button.getAttribute("aria-label") ?? "")).filter((button) => [...button.querySelectorAll("span")].some((span) => NEW_SESSION_TEXT.has((span.textContent ?? "").trim())))[0] ?? null;
@@ -311,6 +447,10 @@ window.__ModuleLoader__.load({
 				titleOccurrence: value.titleOccurrence
 			};
 		}
+		function parseSessionScopeInput(value) {
+			if (!isRecord(value) || typeof value.sessionId !== "string" || value.sessionId.trim() === "") throw new TypeError("session scope input must be a plain object with a non-empty sessionId string");
+			return { sessionId: value.sessionId };
+		}
 		function parseClearCounts(value) {
 			if (!isRecord(value) || !isNatural(value.targets) || !isNatural(value.kept)) throw new TypeError("clear counts must be a plain object with natural targets and kept");
 			return {
@@ -354,10 +494,11 @@ window.__ModuleLoader__.load({
 			};
 		}
 		const CLEAR_SCOPE_INPUT_SCHEMA = { parse: parseClearScopeInput };
+		const SESSION_SCOPE_INPUT_SCHEMA = { parse: parseSessionScopeInput };
 		const PREVIEW_OUTCOME_SCHEMA = { parse: parsePreviewOutcome };
 		const CLEAR_OUTCOME_SCHEMA = { parse: parseClearOutcome };
 		/** The one descriptor each method needs: generated-style identity + strict codecs. */
-		function descriptor(method, result) {
+		function descriptor(method, result, inputSchema = CLEAR_SCOPE_INPUT_SCHEMA) {
 			return {
 				id: `${PREFIX}${method}`,
 				service: SERVICE,
@@ -371,7 +512,7 @@ window.__ModuleLoader__.load({
 					codec: {
 						mode: "strict",
 						typeSymbol: `dsh-clear-session-history#${method}Input`,
-						schema: CLEAR_SCOPE_INPUT_SCHEMA
+						schema: inputSchema
 					}
 				}],
 				result: {
@@ -381,18 +522,29 @@ window.__ModuleLoader__.load({
 				}
 			};
 		}
-		const DESCRIPTORS = [descriptor("preview", PREVIEW_OUTCOME_SCHEMA), descriptor("clear", CLEAR_OUTCOME_SCHEMA)];
+		const DESCRIPTORS = [
+			descriptor("preview", PREVIEW_OUTCOME_SCHEMA),
+			descriptor("clear", CLEAR_OUTCOME_SCHEMA),
+			descriptor("previewSession", PREVIEW_OUTCOME_SCHEMA, SESSION_SCOPE_INPUT_SCHEMA),
+			descriptor("clearSession", CLEAR_OUTCOME_SCHEMA, SESSION_SCOPE_INPUT_SCHEMA)
+		];
 		//#endregion
 		//#region src/client/index.ts
 		/**
 		* Browser half of the Clear Session History plugin.
 		*
-		* Registers no slots: the two affordances live on existing sidebar surfaces
+		* Registers no slots: the three affordances live on existing sidebar surfaces
 		* (see ./augment.ts). This entry mounts the plugin's Remote namespace, hosts
-		* the confirm dialog on its own React root, and wires the three sides
-		* together — augmentation clicks open the dialog, the dialog calls the host
-		* through the Remote, and a successful clear repulls the sidebar's session
-		* list so the deleted rows disappear immediately.
+		* the confirm dialog on its own React root, and wires the sides together —
+		* augmentation clicks open the dialog, the dialog calls the host through the
+		* Remote, and a successful clear reloads the page so the fresh session and
+		* workspace lists reflect the deletion.
+		*
+		* A workspace-menu clear targets a workspace by display title
+		* (+ occurrence among same-titled rows); the clear-all button targets all
+		* workspaces; a session-menu delete targets one session by id, which this
+		* module resolves from the DOM row (workspace group + row index) against the
+		* client session/workspace stores, since session ids never reach the DOM.
 		*
 		* Export discipline (packages/client/AGENTS.md): the ./client entry exports
 		* only `apply`/`inject` and shared types.
@@ -406,7 +558,7 @@ window.__ModuleLoader__.load({
 			});
 			mount.catch(() => {});
 			/** Call one Remote method, surfacing mount/transport failures as outcomes. */
-			const call = async (method, input) => {
+			const call = async (invoke) => {
 				try {
 					await mount;
 					const namespace = ctx.get(`remote.${SERVICE}`);
@@ -414,7 +566,7 @@ window.__ModuleLoader__.load({
 						ok: false,
 						error: "Clear Session History is unavailable — the remote is not mounted."
 					};
-					const result = await method(namespace)(input);
+					const result = await invoke(namespace);
 					if (result.ok) return {
 						ok: true,
 						value: result.value
@@ -430,32 +582,72 @@ window.__ModuleLoader__.load({
 					};
 				}
 			};
+			/**
+			* Resolve a session row to its id. The sidebar renders each workspace
+			* group's rows in `workspace.sessionIds` order, skipping ids with no
+			* summary (deleted) and archived ids — the same filtering this function
+			* applies, so the clicked row's DOM index into the group still addresses
+			* the account. The session title double-checks the match. Ungrouped rows
+			* match by title among sessions no workspace owns, in list order.
+			*/
+			const resolveSessionId = (target) => {
+				const sessions = ctx.sessions;
+				const workspaces = ctx.workspaces;
+				const state = sessions?.list?.getSnapshot();
+				const wsState = workspaces?.list?.getSnapshot();
+				if (state === void 0 || wsState === void 0) return void 0;
+				const archived = new Set(wsState.archivedSessionIds);
+				const visible = (ids) => ids.filter((id) => state.byId[id] !== void 0 && !archived.has(id));
+				if (target.workspaceTitle === null) {
+					const assigned = new Set(wsState.items.flatMap((workspace) => workspace.sessionIds));
+					return visible(state.ids).filter((id) => !assigned.has(id)).filter((id) => state.byId[id]?.title === target.sessionTitle)[target.rowIndex];
+				}
+				const sameTitle = wsState.items.filter((workspace) => workspace.title === target.workspaceTitle);
+				const workspace = sameTitle[target.workspaceOccurrence] ?? sameTitle[0];
+				if (workspace === void 0) return void 0;
+				const account = visible(workspace.sessionIds);
+				const byIndex = account[target.rowIndex];
+				if (byIndex !== void 0 && state.byId[byIndex]?.title === target.sessionTitle) return byIndex;
+				return account.filter((id) => state.byId[id]?.title === target.sessionTitle)[target.rowIndex];
+			};
 			const container = document.createElement("div");
 			const root = (0, react_dom_client.createRoot)(container);
 			const apiRef = { current: null };
-			/** Repull the sidebar session list, best-effort, for partial clears. The
-			* runtime exposes the refresh on the concrete face but not on the ISessions
-			* interface, so the call is duck-typed and simply skipped when absent. */
+			/** Repull the sidebar session list, best-effort, for partial clears. */
 			const refreshSidebar = () => {
 				ctx.sessions?.refresh?.()?.catch(() => {});
 			};
 			/** After a fully successful clear, reload the page. The host has no
 			* "session deleted" push event to notify the sidebar, and the safest way to
 			* guarantee both the session list and the workspace list reflect the
-			* deletion (including the removed workspace registration) is a fresh pull —
-			* the same outcome as the manual reload that already verified the delete. */
+			* deletion is a fresh pull — the same outcome as the manual reload that
+			* already verified the delete. */
 			const reloadAfterClear = () => {
 				window.location.reload();
 			};
-			installSidebarIntegration({ openDialog: (request) => {
+			const openDialog = (request) => {
 				apiRef.current?.open(request);
-			} });
+			};
+			const openSessionDialog = (target) => {
+				const sessionId = resolveSessionId(target);
+				openDialog({
+					mode: "session",
+					workspaceTitle: target.workspaceTitle ?? "",
+					titleOccurrence: target.workspaceOccurrence,
+					...sessionId === void 0 ? {} : { sessionId },
+					sessionTitle: target.sessionTitle
+				});
+			};
+			installSidebarIntegration({
+				openDialog,
+				openSessionDialog
+			});
 			root.render((0, react.createElement)(ClearHistoryDialog, {
 				register: (api) => {
 					apiRef.current = api;
 				},
-				onPreview: (input) => call((ns) => ns.preview, input),
-				onClear: (input) => call((ns) => ns.clear, input),
+				onPreview: (mode, input) => mode === "session" ? call((ns) => ns.previewSession(input)) : call((ns) => ns.preview(input)),
+				onClear: (mode, input) => mode === "session" ? call((ns) => ns.clearSession(input)) : call((ns) => ns.clear(input)),
 				onSuccess: reloadAfterClear,
 				onCleared: refreshSidebar
 			}));
