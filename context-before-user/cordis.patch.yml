@@ -1,0 +1,6 @@
+# Reorder newly injected user-role context before source.kind=user messages at
+# the agent pre-step boundary. The host-only row waits for the agent registry.
+
+- insert:
+    - id: context-before-user
+      name: dsh-context-before-user
