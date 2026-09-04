@@ -1,0 +1,11 @@
+# The dsh-herdr-themes bundle layer: one row that is BOTH the node-half
+# entry and the browser-roster entry (the client-modules node half scans
+# enabled Loader entries for packages declaring `dsh.client`). Activation is
+# service-availability driven: the node half injects `settings` (mounted by
+# dsh-base), and the browser half injects `slots`/`settingsScope`/`theme`
+# (slots and settingsScope by the web client composition, theme by
+# dsh-client-ui-theme).
+
+- insert:
+    - id: herdr-themes
+      name: dsh-herdr-themes
