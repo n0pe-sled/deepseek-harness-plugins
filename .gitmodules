@@ -1,0 +1,24 @@
+[submodule "clear-session-history"]
+	path = clear-session-history
+	url = https://github.com/n0pe-sled/clear-session-history.git
+[submodule "configurable-subagents"]
+	path = configurable-subagents
+	url = https://github.com/n0pe-sled/configurable-subagents.git
+[submodule "context-before-user"]
+	path = context-before-user
+	url = https://github.com/n0pe-sled/context-before-user.git
+[submodule "herdr-themes"]
+	path = herdr-themes
+	url = https://github.com/n0pe-sled/herdr-themes.git
+[submodule "skill-mcp-manager"]
+	path = skill-mcp-manager
+	url = https://github.com/n0pe-sled/skill-mcp-manager.git
+[submodule "subscription-logins"]
+	path = subscription-logins
+	url = https://github.com/n0pe-sled/subscription-logins.git
+[submodule "system-prompt-editor"]
+	path = system-prompt-editor
+	url = https://github.com/n0pe-sled/system-prompt-editor.git
+[submodule "web-search-searxng"]
+	path = web-search-searxng
+	url = https://github.com/n0pe-sled/web-search-searxng.git
