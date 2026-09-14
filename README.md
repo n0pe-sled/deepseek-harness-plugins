@@ -20,6 +20,7 @@ what you get after a recursive clone:
 | [`dsh-clear-session-history`](https://github.com/n0pe-sled/clear-session-history) | **Clear session history from disk.** Red "Clear session history" row in each workspace's "…" menu, red "Clear all session history" button below New Session, and red "Delete session" row in each session's "…" menu. All delete session logs through the host's persistence backend and gate the action behind a checkbox confirm showing the exact scope, then reload. Workspace/all flows keep currently-open sessions and remove the cleared workspace(s); Delete session works on open-but-idle sessions too (only an actively running agent is refused), hiding the row as it goes. |
 | [`dsh-subscription-logins`](https://github.com/n0pe-sled/subscription-logins) | **Subscription credentials.** Adds a Logins Settings page for ChatGPT and Claude OAuth plus Z.AI Coding Plan API keys. Save named Work and Personal accounts, then choose the active credential. Pure plugin, with no harness core patch. |
 | [`dsh-herdr-themes`](https://github.com/n0pe-sled/herdr-themes) | **Settings → "Themes"**. The 18 themes that ship with herdr (Catppuccin, Tokyo Night, Dracula, Nord, Gruvbox, One Dark/Light, Solarized, Kanagawa, Rosé Pine, Vesper, …), each with live swatch cards. Click to preview, **Use theme** to save; the choice persists across reloads and overrides the base light/dark palette. |
+| [`dsh-at-file`](https://github.com/n0pe-sled/dsh-at-file) | **`@`-path workspace references.** Type `@` in the composer to search the current workspace and insert a file or directory path; send-time validation injects a `<workspace-reference>` marker (path + kind only, symlink-contained). Best-effort maintenance — official dsh releases now ship built-in `@file`/`@session`. |
 
 Each plugin's README documents its behavior, config, and verification in detail.
 
@@ -48,6 +49,7 @@ dsh plugin --profile web add ~/dsh-plugins/context-before-user
 dsh plugin --profile web add ~/dsh-plugins/clear-session-history
 dsh plugin --profile web add ~/dsh-plugins/subscription-logins
 dsh plugin --profile web add ~/dsh-plugins/herdr-themes
+dsh plugin --profile web add ~/dsh-plugins/dsh-at-file
 ```
 
 Restart the GUI, then open **Settings**. The installed plugin pages, including
@@ -81,6 +83,8 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   http://127.0.0.1:3080/plugins/dsh-subscription-logins/client.js # 200
 curl -s -o /dev/null -w "%{http_code}\n" \
   http://127.0.0.1:3080/plugins/dsh-herdr-themes/client.js       # 200
+curl -s -o /dev/null -w "%{http_code}\n" \
+  http://127.0.0.1:3080/plugins/dsh-at-file/client.js            # 200
 ```
 
 ## Updating

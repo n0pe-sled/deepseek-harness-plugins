@@ -22,3 +22,6 @@
 [submodule "web-search-searxng"]
 	path = web-search-searxng
 	url = https://github.com/n0pe-sled/web-search-searxng.git
+[submodule "dsh-at-file"]
+	path = dsh-at-file
+	url = https://github.com/n0pe-sled/dsh-at-file.git
