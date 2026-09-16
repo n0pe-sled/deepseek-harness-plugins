@@ -25,3 +25,6 @@
 [submodule "dsh-at-file"]
 	path = dsh-at-file
 	url = https://github.com/n0pe-sled/dsh-at-file.git
+[submodule "session-shell"]
+	path = session-shell
+	url = https://github.com/n0pe-sled/session-shell.git
