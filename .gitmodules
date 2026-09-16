@@ -28,3 +28,6 @@
 [submodule "session-shell"]
 	path = session-shell
 	url = https://github.com/n0pe-sled/session-shell.git
+[submodule "session-ide"]
+	path = session-ide
+	url = https://github.com/n0pe-sled/session-ide.git
